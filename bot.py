@@ -77,30 +77,43 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def save_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
+
     msg = update.message.reply_to_message
     if not msg:
         await update.message.reply_text("Reply to a file message with /save.")
         return
+
     try:
         copied = await context.bot.copy_message(
             chat_id=DB_CHANNEL_ID,
             from_chat_id=msg.chat_id,
             message_id=msg.message_id,
         )
-        file_id = db.add_file(DB_CHANNEL_ID, copied.message_id, msg.caption or "")
-        link = f"https://t.me/{BOT_USERNAME}?start=file_{file_id}"
-        sent = await update.message.reply_text(
-    f"✅ File saved.\n\n🆔 {file_id}\n🔗 {link}"
-)
 
-await asyncio.sleep(600)
-try:
-    await sent.delete()
-except Exception:
-    pass
+        file_id = db.add_file(
+            DB_CHANNEL_ID,
+            copied.message_id,
+            msg.caption or ""
+        )
+
+        link = f"https://t.me/{BOT_USERNAME}?start=file_{file_id}"
+
+        sent = await update.message.reply_text(
+            f"✅ File saved.\n\n🆔 {file_id}\n🔗 {link}"
+        )
+
+        await asyncio.sleep(600)
+
+        try:
+            await sent.delete()
+        except Exception:
+            pass
+
     except Exception as e:
         log.exception("save failed")
-        await update.message.reply_text(f"❌ Could not save file: {e}")
+        await update.message.reply_text(
+            f"❌ Could not save file: {e}"
+    )
 async def get_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) != 1:
         await update.message.reply_text("Usage: /get <file_id>")

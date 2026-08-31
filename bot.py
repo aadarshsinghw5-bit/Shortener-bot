@@ -89,9 +89,15 @@ async def save_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         file_id = db.add_file(DB_CHANNEL_ID, copied.message_id, msg.caption or "")
         link = f"https://t.me/{BOT_USERNAME}?start=file_{file_id}"
-        await update.message.reply_text(
+        sent = await update.message.reply_text(
     f"✅ File saved.\n\n🆔 {file_id}\n🔗 {link}"
-        )
+)
+
+await asyncio.sleep(600)
+try:
+    await sent.delete()
+except Exception:
+    pass
     except Exception as e:
         log.exception("save failed")
         await update.message.reply_text(f"❌ Could not save file: {e}")

@@ -11,7 +11,6 @@ from shortener import Shortener
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
-
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 OWNER_ID = int(os.environ["OWNER_ID"])
 DB_CHANNEL_ID = int(os.environ["DB_CHANNEL_ID"])
@@ -25,9 +24,24 @@ shortener = Shortener(
 )
 shortener.bind_db(db)
 
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"Bot is running!")
+
+    def log_message(self, format, *args):
+        return
+
+def start_health_server():
+    port = int(os.environ.get("PORT", "10000"))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    log.info("Health server running on port %s", port)
+    server.serve_forever()
+
 def is_admin(user_id: int) -> bool:
     return user_id == OWNER_ID or db.is_admin(user_id)
-
 def is_owner(user_id: int) -> bool:
     return user_id == OWNER_ID
 
@@ -39,13 +53,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if arg.startswith("batch_"):
         await deliver_batch(update, context, arg[6:])
         return
-
     await update.message.reply_text(
         "👋 Welcome!\n\n"
         "Use a file/batch link to receive files.\n"
         "Use /help to see commands."
     )
-
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📚 Commands\n\n"
@@ -62,7 +74,6 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "To store files: send/reply with a document, video, audio or photo "
         "in this chat and use /save on the message."
     )
-
 async def save_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
@@ -70,7 +81,6 @@ async def save_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg:
         await update.message.reply_text("Reply to a file message with /save.")
         return
-
     try:
         copied = await context.bot.copy_message(
             chat_id=DB_CHANNEL_ID,
@@ -86,7 +96,6 @@ async def save_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         log.exception("save failed")
         await update.message.reply_text(f"❌ Could not save file: {e}")
-
 async def get_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) != 1:
         await update.message.reply_text("Usage: /get <file_id>")
@@ -98,7 +107,6 @@ async def deliver_file(update: Update, context: ContextTypes.DEFAULT_TYPE, file_
     if not row:
         await update.effective_message.reply_text("❌ File not found.")
         return
-
     uid = update.effective_user.id
     if db.is_subscribed(uid):
         await copy_stored_message(context, update.effective_chat.id, row)
@@ -110,7 +118,6 @@ async def deliver_file(update: Update, context: ContextTypes.DEFAULT_TYPE, file_
             "⚠️ Shortener is not configured correctly."
         )
         return
-
     await update.effective_message.reply_text(
         "🔐 You are not subscribed.\n"
         "Complete the shortener first, then open the verification link to receive the file.",
@@ -118,7 +125,6 @@ async def deliver_file(update: Update, context: ContextTypes.DEFAULT_TYPE, file_
             [[InlineKeyboardButton("🔗 Continue", url=short_url)]]
         ),
     )
-
 async def deliver_batch(update: Update, context: ContextTypes.DEFAULT_TYPE, batch_id: str):
     items = db.get_batch_items(batch_id)
     if not items:
@@ -129,7 +135,6 @@ async def deliver_batch(update: Update, context: ContextTypes.DEFAULT_TYPE, batc
     if db.is_subscribed(uid):
         await send_batch(context, update.effective_chat.id, items)
         return
-
     short_url = shortener.create(file_id=f"batch:{batch_id}", user_id=uid)
     if not short_url:
         await update.effective_message.reply_text("⚠️ Shortener is not configured correctly.")
@@ -142,7 +147,6 @@ async def deliver_batch(update: Update, context: ContextTypes.DEFAULT_TYPE, batc
             [[InlineKeyboardButton("🔗 Unlock Batch", url=short_url)]]
         ),
     )
-
 async def verify_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) != 1:
         await update.message.reply_text("Usage: /verify <token>")
@@ -157,7 +161,6 @@ async def verify_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if uid != update.effective_user.id:
         await update.message.reply_text("❌ This token belongs to another user.")
         return
-
     if target.startswith("batch:"):
         items = db.get_batch_items(target[6:])
         await send_batch(context, update.effective_chat.id, items)
@@ -167,7 +170,6 @@ async def verify_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await copy_stored_message(context, update.effective_chat.id, row)
         else:
             await update.message.reply_text("❌ File not found.")
-
 async def send_batch(context, chat_id, items):
     for row in items:
         try:
@@ -181,7 +183,6 @@ async def copy_stored_message(context, chat_id, row):
         from_chat_id=row["channel_id"],
         message_id=row["message_id"],
     )
-
 async def batch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
@@ -193,7 +194,6 @@ async def batch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not valid:
         await update.message.reply_text("❌ No valid file IDs.")
         return
-
     batch_id = db.create_batch(valid)
     link = f"https://t.me/{BOT_USERNAME}?start=batch_{batch_id}"
     await update.message.reply_text(
@@ -201,7 +201,6 @@ async def batch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🆔 `{batch_id}`\n🔗 {link}",
         parse_mode=ParseMode.MARKDOWN,
     )
-
 async def addsub_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
@@ -214,7 +213,6 @@ async def addsub_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Subscription added for {uid} for {days} days.")
     except ValueError:
         await update.message.reply_text("❌ User ID and days must be numbers.")
-
 async def remsub_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
@@ -223,7 +221,6 @@ async def remsub_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     db.remove_subscription(int(context.args[0]))
     await update.message.reply_text("✅ Subscription removed.")
-
 async def addadmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id):
         return
@@ -232,7 +229,6 @@ async def addadmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     db.add_admin(int(context.args[0]))
     await update.message.reply_text("✅ Admin added.")
-
 async def removeadmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_owner(update.effective_user.id):
         return
@@ -241,7 +237,6 @@ async def removeadmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     db.remove_admin(int(context.args[0]))
     await update.message.reply_text("✅ Admin removed.")
-
 async def admins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
@@ -249,7 +244,6 @@ async def admins_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = f"👑 Owner: `{OWNER_ID}`\n"
     text += "\n".join(f"• `{x}`" for x in admins) if admins else "• No additional admins"
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-
 async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
@@ -263,8 +257,10 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    health_thread = threading.Thread(target=start_health_server, daemon=True)
+    health_thread.start()
 
+    app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("save", save_cmd))
@@ -277,7 +273,6 @@ def main():
     app.add_handler(CommandHandler("removeadmin", removeadmin_cmd))
     app.add_handler(CommandHandler("admins", admins_cmd))
     app.add_handler(CommandHandler("stats", stats_cmd))
-
     log.info("Bot starting")
     app.run_polling()
 

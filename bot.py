@@ -90,8 +90,7 @@ async def save_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_id = db.add_file(DB_CHANNEL_ID, copied.message_id, msg.caption or "")
         link = f"https://t.me/{BOT_USERNAME}?start=file_{file_id}"
         await update.message.reply_text(
-            f"✅ File saved.\n\n🆔 `{file_id}`\n🔗 {link}",
-            parse_mode=ParseMode.MARKDOWN,
+    f"✅ File saved.\n\n🆔 {file_id}\n🔗 {link}"
         )
     except Exception as e:
         log.exception("save failed")

@@ -22,7 +22,6 @@ shortener = Shortener(
     os.getenv("SHORTENER_API_KEY", ""),
     BOT_USERNAME,
 )
-shortener.bind_db(db)
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):

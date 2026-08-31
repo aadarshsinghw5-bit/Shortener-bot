@@ -21,6 +21,7 @@ shortener = Shortener(
     os.getenv("SHORTENER_API_URL", ""),
     os.getenv("SHORTENER_API_KEY", ""),
     BOT_USERNAME,
+    db,
 )
 
 class HealthHandler(BaseHTTPRequestHandler):

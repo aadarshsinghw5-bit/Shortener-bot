@@ -409,26 +409,21 @@ async def save_cmd(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    if not is_admin(
-        update.effective_user.id
-    ):
+    if not is_admin(update.effective_user.id):
         return
 
     msg = update.message.reply_to_message
 
     if not msg:
-
         await update.message.reply_text(
             "Reply to a file/post with /save."
         )
-
         return
 
     try:
-
-        # ---------------------------------------------
+        # ==========================================
         # COPY POST TO DATABASE CHANNEL
-        # ---------------------------------------------
+        # ==========================================
 
         copied = await context.bot.copy_message(
             chat_id=DB_CHANNEL_ID,
@@ -436,9 +431,9 @@ async def save_cmd(
             message_id=msg.message_id
         )
 
-        # ---------------------------------------------
+        # ==========================================
         # SAVE FILE IN DATABASE
-        # ---------------------------------------------
+        # ==========================================
 
         file_id = db.add_file(
             DB_CHANNEL_ID,
@@ -451,45 +446,34 @@ async def save_cmd(
             flush=True
         )
 
-        # ---------------------------------------------
-        # CREATE SHAREABLE SHORTENER LINK
-        # ---------------------------------------------
-
-        short_url = shortener.create(
-            file_id=file_id,
-            user_id=0
+        # ==========================================
+        # BOT DEEP LINK
+        # ==========================================
+        #
+        # IMPORTANT:
+        # We are NOT putting AroLinks here.
+        #
+        # User clicks Share Link
+        # → Bot opens
+        # → bot generates AroLinks
+        # → user gets Continue button
+        #
+        bot_link = (
+            f"https://t.me/{BOT_USERNAME}"
+            f"?start=file_{file_id}"
         )
 
-        if not short_url:
-
-            await update.message.reply_text(
-                f"⚠️ File saved.\n\n"
-                f"🆔 {file_id}\n\n"
-                "❌ Could not create shortener link."
-            )
-
-            return
-
-        print(
-            f"🔥 Short URL created: {short_url}",
-            flush=True
-        )
-
-        # ---------------------------------------------
-        # TELEGRAM SHARE URL
-        # ---------------------------------------------
+        # ==========================================
+        # TELEGRAM SHARE LINK
+        # ==========================================
 
         share_url = (
             "https://telegram.me/share/url?url="
             + quote(
-                short_url,
+                bot_link,
                 safe=""
             )
         )
-
-        # ---------------------------------------------
-        # BUTTON
-        # ---------------------------------------------
 
         keyboard = InlineKeyboardMarkup(
             [
@@ -502,9 +486,9 @@ async def save_cmd(
             ]
         )
 
-        # ---------------------------------------------
-        # ADD BUTTON TO DB CHANNEL POST
-        # ---------------------------------------------
+        # ==========================================
+        # ADD BUTTON BELOW DB CHANNEL POST
+        # ==========================================
 
         try:
 
@@ -515,7 +499,7 @@ async def save_cmd(
             )
 
             print(
-                "🔥 Share button added to DB channel",
+                "🔥 Share button added to DB post",
                 flush=True
             )
 
@@ -526,28 +510,21 @@ async def save_cmd(
                 e
             )
 
-        # ---------------------------------------------
+        # ==========================================
         # ADMIN CONFIRMATION
-        # ---------------------------------------------
-
-        direct_link = (
-            f"https://t.me/"
-            f"{BOT_USERNAME}"
-            f"?start=file_{file_id}"
-        )
+        # ==========================================
 
         await update.message.reply_text(
             f"✅ File saved successfully!\n\n"
-            f"🆔 {file_id}\n"
-            f"🔗 {direct_link}\n\n"
-            "📤 Share Link button added to DB channel."
+            f"🆔 File ID: `{file_id}`\n\n"
+            f"🤖 Bot Link:\n{bot_link}\n\n"
+            f"📤 Share Link button added to DB channel.",
+            parse_mode=ParseMode.MARKDOWN
         )
 
     except Exception as e:
 
-        log.exception(
-            "SAVE ERROR"
-        )
+        log.exception("SAVE ERROR")
 
         await update.message.reply_text(
             f"❌ Could not save file:\n{e}"

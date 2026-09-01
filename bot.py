@@ -122,60 +122,54 @@ async def get_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def deliver_file(update: Update, context: ContextTypes.DEFAULT_TYPE, file_id: str):
     row = db.get_file(file_id)
+
     if not row:
         await update.effective_message.reply_text("❌ File not found.")
         return
+
     uid = update.effective_user.id
+    chat_id = update.effective_chat.id
+
     if db.is_subscribed(uid):
-    file_message = await copy_stored_message(
-        context,
-        update.effective_chat.id,
-        row
-    )
-
-    warning_message = await update.effective_message.reply_text(
-        "⏳ This file will be automatically deleted in 10 minutes."
-    )
-
-    asyncio.create_task(
-        delete_after_10_minutes(
+        file_message = await copy_stored_message(
             context,
-            update.effective_chat.id,
-            file_message.message_id,
-            warning_message.message_id
+            chat_id,
+            row
         )
-    )
 
-    return
-
-    warning_message = await update.effective_message.reply_text(
-        "⏳ This file will be automatically deleted in 10 minutes."
-    )
-
-    asyncio.create_task(
-        delete_after_10_minutes(
-            context,
-            update.effective_chat.id,
-            file_message.message_id,
-            warning_message.message_id
+        warning_message = await update.effective_message.reply_text(
+            "⏳ This file will be automatically deleted in 10 minutes."
         )
+
+        asyncio.create_task(
+            delete_after_10_minutes(
+                context,
+                chat_id,
+                file_message.message_id,
+                warning_message.message_id
+            )
+        )
+
+        return
+
+    short_url = shortener.create(
+        file_id=file_id,
+        user_id=uid
     )
 
-    return
-
-    short_url = shortener.create(file_id=file_id, user_id=uid)
     if not short_url:
         await update.effective_message.reply_text(
             "⚠️ Shortener is not configured correctly."
         )
         return
+
     await update.effective_message.reply_text(
         "🔐 You are not subscribed.\n"
         "Complete the shortener first, then open the verification link to receive the file.",
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton("🔗 Continue", url=short_url)]]
         ),
-    )
+        )
 async def deliver_batch(update: Update, context: ContextTypes.DEFAULT_TYPE, batch_id: str):
     items = db.get_batch_items(batch_id)
     if not items:

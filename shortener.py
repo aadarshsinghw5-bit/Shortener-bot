@@ -1,15 +1,10 @@
 import uuid
 import requests
 
+
 class Shortener:
     """
     AroLinks API adapter.
-
-    AroLinks accepts:
-      GET https://arolinks.com/api?api=API_TOKEN&url=DESTINATION&alias=CustomAlias
-
-    JSON response:
-      {"status":"success","shortenedUrl":"https://arolinks.com/xxxxx"}
     """
 
     def __init__(self, api_url, api_key, bot_username, db):
@@ -20,12 +15,14 @@ class Shortener:
 
     def create(self, file_id, user_id):
         if not self.api_key:
+            print("❌ SHORTENER_API_KEY is empty")
             return None
 
         token = self.db.create_token(user_id, file_id)
-        destination = f"https://t.me/{self.bot_username}?start=verify_{token}"
+        destination = (
+            f"https://t.me/{self.bot_username}?start=verify_{token}"
+        )
 
-        # Use a unique alias only when supported by the account.
         alias = "f" + uuid.uuid4().hex[:10]
 
         try:
@@ -38,14 +35,28 @@ class Shortener:
                 },
                 timeout=20,
             )
+
+            print("AroLinks HTTP:", response.status_code)
+            print("AroLinks response:", response.text)
+
             response.raise_for_status()
+
             data = response.json()
 
             if data.get("status") != "success":
+                print("❌ AroLinks API error:", data)
                 return None
 
-            return data.get("shortenedUrl")
-        except (requests.RequestException, ValueError):
+            shortened_url = data.get("shortenedUrl")
+
+            if not shortened_url:
+                print("❌ AroLinks returned no shortenedUrl")
+                return None
+
+            return shortened_url
+
+        except Exception as e:
+            print("❌ AroLinks error:", repr(e))
             return None
 
     def verify(self, token):

@@ -7,7 +7,6 @@ from urllib.parse import quote
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes
-from telegram.constants import ParseMode
 
 from database import Database
 from shortener import Shortener
@@ -93,6 +92,7 @@ DELETE_AFTER_SECONDS = 600
 class HealthHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
+
         self.send_response(200)
 
         self.send_header(
@@ -113,6 +113,7 @@ class HealthHandler(BaseHTTPRequestHandler):
 def start_health_server():
 
     try:
+
         port = int(
             os.environ.get(
                 "PORT",
@@ -390,7 +391,6 @@ async def help_cmd(
         "/get <file_id> — get a file\n"
         "/save — save replied file/post (admin)\n"
         "/batch <file_id> ... — create batch (admin)\n"
-        "/files — list files (admin)\n"
         "/addsub <user_id> <days> — add subscription\n"
         "/remsub <user_id> — remove subscription\n"
         "/addadmin <user_id> — owner only\n"
@@ -415,15 +415,18 @@ async def save_cmd(
     msg = update.message.reply_to_message
 
     if not msg:
+
         await update.message.reply_text(
             "Reply to a file/post with /save."
         )
+
         return
 
     try:
-        # ==========================================
+
+        # =================================================
         # COPY POST TO DATABASE CHANNEL
-        # ==========================================
+        # =================================================
 
         copied = await context.bot.copy_message(
             chat_id=DB_CHANNEL_ID,
@@ -431,9 +434,9 @@ async def save_cmd(
             message_id=msg.message_id
         )
 
-        # ==========================================
+        # =================================================
         # SAVE FILE IN DATABASE
-        # ==========================================
+        # =================================================
 
         file_id = db.add_file(
             DB_CHANNEL_ID,
@@ -446,29 +449,46 @@ async def save_cmd(
             flush=True
         )
 
-        # ==========================================
-        # BOT DEEP LINK
-        # ==========================================
+        # =================================================
+        # CREATE BOT DEEP LINK
+        # =================================================
         #
         # IMPORTANT:
-        # We are NOT putting AroLinks here.
         #
-        # User clicks Share Link
-        # → Bot opens
-        # → bot generates AroLinks
-        # → user gets Continue button
+        # Share button contains ONLY the BOT link.
         #
+        # User clicks:
+        #
+        # Telegram Share
+        #       ↓
+        # Bot
+        #       ↓
+        # /start file_xxx
+        #       ↓
+        # AroLinks created
+        #       ↓
+        # Continue button
+        #
+        # =================================================
+
         bot_link = (
-            f"https://t.me/{BOT_USERNAME}"
+            f"https://t.me/"
+            f"{BOT_USERNAME}"
             f"?start=file_{file_id}"
         )
 
-        # ==========================================
-        # TELEGRAM SHARE LINK
-        # ==========================================
+        print(
+            f"🔥 Bot deep link: {bot_link}",
+            flush=True
+        )
+
+        # =================================================
+        # TELEGRAM SHARE URL
+        # =================================================
 
         share_url = (
-            "https://telegram.me/share/url?url="
+            "https://telegram.me/share/url"
+            "?url="
             + quote(
                 bot_link,
                 safe=""
@@ -486,9 +506,9 @@ async def save_cmd(
             ]
         )
 
-        # ==========================================
-        # ADD BUTTON BELOW DB CHANNEL POST
-        # ==========================================
+        # =================================================
+        # ADD SHARE BUTTON TO DB CHANNEL POST
+        # =================================================
 
         try:
 
@@ -510,21 +530,31 @@ async def save_cmd(
                 e
             )
 
-        # ==========================================
+        # =================================================
         # ADMIN CONFIRMATION
-        # ==========================================
+        # =================================================
+        #
+        # NO MARKDOWN
+        #
+        # This fixes:
+        #
+        # BadRequest:
+        # Can't parse entities
+        #
+        # =================================================
 
         await update.message.reply_text(
             f"✅ File saved successfully!\n\n"
-            f"🆔 File ID: `{file_id}`\n\n"
+            f"🆔 File ID: {file_id}\n\n"
             f"🤖 Bot Link:\n{bot_link}\n\n"
-            f"📤 Share Link button added to DB channel.",
-            parse_mode=ParseMode.MARKDOWN
+            f"📤 Share Link button added to DB channel."
         )
 
     except Exception as e:
 
-        log.exception("SAVE ERROR")
+        log.exception(
+            "SAVE ERROR"
+        )
 
         await update.message.reply_text(
             f"❌ Could not save file:\n{e}"
@@ -580,9 +610,9 @@ async def deliver_file(
     uid = update.effective_user.id
     chat_id = update.effective_chat.id
 
-    # ---------------------------------------------
+    # =================================================
     # SUBSCRIBED USER
-    # ---------------------------------------------
+    # =================================================
 
     if db.is_subscribed(uid):
 
@@ -594,9 +624,9 @@ async def deliver_file(
 
         return
 
-    # ---------------------------------------------
+    # =================================================
     # NON-SUBSCRIBED USER
-    # ---------------------------------------------
+    # =================================================
 
     short_url = shortener.create(
         file_id=file_id,
@@ -653,9 +683,9 @@ async def deliver_batch(
     uid = update.effective_user.id
     chat_id = update.effective_chat.id
 
-    # ---------------------------------------------
+    # =================================================
     # SUBSCRIBED USER
-    # ---------------------------------------------
+    # =================================================
 
     if db.is_subscribed(uid):
 
@@ -667,9 +697,9 @@ async def deliver_batch(
 
         return
 
-    # ---------------------------------------------
-    # SHORTENER
-    # ---------------------------------------------
+    # =================================================
+    # CREATE AROLINKS
+    # =================================================
 
     short_url = shortener.create(
         file_id=f"batch:{batch_id}",
@@ -752,9 +782,9 @@ async def verify_token(
         update.effective_user.id
     )
 
-    # ---------------------------------------------
-    # PERSONAL TOKEN
-    # ---------------------------------------------
+    # =================================================
+    # PERSONAL TOKEN CHECK
+    # =================================================
 
     if (
         token_user_id != 0
@@ -769,9 +799,9 @@ async def verify_token(
 
     chat_id = update.effective_chat.id
 
-    # ---------------------------------------------
+    # =================================================
     # BATCH
-    # ---------------------------------------------
+    # =================================================
 
     if target.startswith("batch:"):
 
@@ -795,9 +825,9 @@ async def verify_token(
 
         return
 
-    # ---------------------------------------------
+    # =================================================
     # FILE
-    # ---------------------------------------------
+    # =================================================
 
     row = db.get_file(
         target
@@ -845,7 +875,10 @@ async def batch_cmd(
     for file_id in context.args:
 
         if db.get_file(file_id):
-            valid.append(file_id)
+
+            valid.append(
+                file_id
+            )
 
     if not valid:
 
@@ -986,6 +1019,16 @@ async def remsub_cmd(
             "❌ User ID must be a number."
         )
 
+    except Exception as e:
+
+        log.exception(
+            "REMSUB ERROR"
+        )
+
+        await update.message.reply_text(
+            f"❌ Error:\n{e}"
+        )
+
 
 # =========================================================
 # ADD ADMIN
@@ -1029,6 +1072,16 @@ async def addadmin_cmd(
             "❌ User ID must be a number."
         )
 
+    except Exception as e:
+
+        log.exception(
+            "ADDADMIN ERROR"
+        )
+
+        await update.message.reply_text(
+            f"❌ Error:\n{e}"
+        )
+
 
 # =========================================================
 # REMOVE ADMIN
@@ -1070,6 +1123,16 @@ async def removeadmin_cmd(
 
         await update.message.reply_text(
             "❌ User ID must be a number."
+        )
+
+    except Exception as e:
+
+        log.exception(
+            "REMOVEADMIN ERROR"
+        )
+
+        await update.message.reply_text(
+            f"❌ Error:\n{e}"
         )
 
 
@@ -1153,9 +1216,9 @@ async def stats_cmd(
 
 def main():
 
-    # ---------------------------------------------
+    # =====================================================
     # START RENDER HEALTH SERVER
-    # ---------------------------------------------
+    # =====================================================
 
     health_thread = threading.Thread(
         target=start_health_server,
@@ -1164,9 +1227,9 @@ def main():
 
     health_thread.start()
 
-    # ---------------------------------------------
+    # =====================================================
     # CREATE TELEGRAM APPLICATION
-    # ---------------------------------------------
+    # =====================================================
 
     app = (
         Application
@@ -1175,9 +1238,9 @@ def main():
         .build()
     )
 
-    # ---------------------------------------------
+    # =====================================================
     # COMMAND HANDLERS
-    # ---------------------------------------------
+    # =====================================================
 
     app.add_handler(
         CommandHandler(
@@ -1263,11 +1326,13 @@ def main():
         )
     )
 
-    # ---------------------------------------------
+    # =====================================================
     # START BOT
-    # ---------------------------------------------
+    # =====================================================
 
-    log.info("🔥 Bot starting on Render...")
+    log.info(
+        "🔥 Bot starting on Render..."
+    )
 
     app.run_polling(
         drop_pending_updates=True

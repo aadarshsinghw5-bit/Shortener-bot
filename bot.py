@@ -127,8 +127,41 @@ async def deliver_file(update: Update, context: ContextTypes.DEFAULT_TYPE, file_
         return
     uid = update.effective_user.id
     if db.is_subscribed(uid):
-        await copy_stored_message(context, update.effective_chat.id, row)
-        return
+    file_message = await copy_stored_message(
+        context,
+        update.effective_chat.id,
+        row
+    )
+
+    warning_message = await update.effective_message.reply_text(
+        "⏳ This file will be automatically deleted in 10 minutes."
+    )
+
+    asyncio.create_task(
+        delete_after_10_minutes(
+            context,
+            update.effective_chat.id,
+            file_message.message_id,
+            warning_message.message_id
+        )
+    )
+
+    return
+
+    warning_message = await update.effective_message.reply_text(
+        "⏳ This file will be automatically deleted in 10 minutes."
+    )
+
+    asyncio.create_task(
+        delete_after_10_minutes(
+            context,
+            update.effective_chat.id,
+            file_message.message_id,
+            warning_message.message_id
+        )
+    )
+
+    return
 
     short_url = shortener.create(file_id=file_id, user_id=uid)
     if not short_url:
@@ -185,7 +218,24 @@ async def verify_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         row = db.get_file(target)
         if row:
-            await copy_stored_message(context, update.effective_chat.id, row)
+    file_message = await copy_stored_message(
+        context,
+        update.effective_chat.id,
+        row
+    )
+
+    warning_message = await update.effective_message.reply_text(
+        "⏳ This file will be automatically deleted in 10 minutes."
+    )
+
+    asyncio.create_task(
+        delete_after_10_minutes(
+            context,
+            update.effective_chat.id,
+            file_message.message_id,
+            warning_message.message_id
+        )
+        )
         else:
             await update.message.reply_text("❌ File not found.")
 async def send_batch(context, chat_id, items):
@@ -195,12 +245,17 @@ async def send_batch(context, chat_id, items):
         except Exception:
             log.exception("batch delivery failed")
 
-async def copy_stored_message(context, chat_id, row):
-    await context.bot.copy_message(
-        chat_id=chat_id,
-        from_chat_id=row["channel_id"],
-        message_id=row["message_id"],
-    )
+async def delete_after_10_minutes(context, chat_id, file_message_id, warning_message_id):
+    await asyncio.sleep(600)
+
+    for message_id in (file_message_id, warning_message_id):
+        try:
+            await context.bot.delete_message(
+                chat_id=chat_id,
+                message_id=message_id
+            )
+        except Exception:
+            log.exception("Could not delete message %s", message_id)
 async def batch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return

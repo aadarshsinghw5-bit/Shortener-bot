@@ -93,7 +93,6 @@ DELETE_AFTER_SECONDS = 600
 class HealthHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
-
         self.send_response(200)
 
         self.send_header(
@@ -114,7 +113,6 @@ class HealthHandler(BaseHTTPRequestHandler):
 def start_health_server():
 
     try:
-
         port = int(
             os.environ.get(
                 "PORT",
@@ -180,7 +178,7 @@ async def copy_stored_message(
 
 
 # =========================================================
-# DELETE MESSAGES AFTER 10 MINUTES
+# DELETE AFTER 10 MINUTES
 # =========================================================
 
 async def delete_after_10_minutes(
@@ -231,7 +229,7 @@ async def delete_after_10_minutes(
 
 
 # =========================================================
-# SEND FILE WITH AUTO DELETE
+# SEND FILE + AUTO DELETE
 # =========================================================
 
 async def send_file_with_auto_delete(
@@ -265,7 +263,7 @@ async def send_file_with_auto_delete(
 
 
 # =========================================================
-# SEND BATCH WITH AUTO DELETE
+# SEND BATCH + AUTO DELETE
 # =========================================================
 
 async def send_batch_with_auto_delete(
@@ -392,6 +390,7 @@ async def help_cmd(
         "/get <file_id> — get a file\n"
         "/save — save replied file/post (admin)\n"
         "/batch <file_id> ... — create batch (admin)\n"
+        "/files — list files (admin)\n"
         "/addsub <user_id> <days> — add subscription\n"
         "/remsub <user_id> — remove subscription\n"
         "/addadmin <user_id> — owner only\n"
@@ -427,14 +426,20 @@ async def save_cmd(
 
     try:
 
-        # Copy to DB channel
+        # ---------------------------------------------
+        # COPY POST TO DATABASE CHANNEL
+        # ---------------------------------------------
+
         copied = await context.bot.copy_message(
             chat_id=DB_CHANNEL_ID,
             from_chat_id=msg.chat_id,
             message_id=msg.message_id
         )
 
-        # Save DB record
+        # ---------------------------------------------
+        # SAVE FILE IN DATABASE
+        # ---------------------------------------------
+
         file_id = db.add_file(
             DB_CHANNEL_ID,
             copied.message_id,
@@ -446,8 +451,10 @@ async def save_cmd(
             flush=True
         )
 
-        # Create SHAREABLE shortener token
-        # user_id=0 means anyone can use it
+        # ---------------------------------------------
+        # CREATE SHAREABLE SHORTENER LINK
+        # ---------------------------------------------
+
         short_url = shortener.create(
             file_id=file_id,
             user_id=0
@@ -463,7 +470,15 @@ async def save_cmd(
 
             return
 
-        # Telegram share URL
+        print(
+            f"🔥 Short URL created: {short_url}",
+            flush=True
+        )
+
+        # ---------------------------------------------
+        # TELEGRAM SHARE URL
+        # ---------------------------------------------
+
         share_url = (
             "https://telegram.me/share/url?url="
             + quote(
@@ -471,6 +486,10 @@ async def save_cmd(
                 safe=""
             )
         )
+
+        # ---------------------------------------------
+        # BUTTON
+        # ---------------------------------------------
 
         keyboard = InlineKeyboardMarkup(
             [
@@ -483,13 +502,21 @@ async def save_cmd(
             ]
         )
 
-        # Add button below DB channel post
+        # ---------------------------------------------
+        # ADD BUTTON TO DB CHANNEL POST
+        # ---------------------------------------------
+
         try:
 
             await context.bot.edit_message_reply_markup(
                 chat_id=DB_CHANNEL_ID,
                 message_id=copied.message_id,
                 reply_markup=keyboard
+            )
+
+            print(
+                "🔥 Share button added to DB channel",
+                flush=True
             )
 
         except Exception as e:
@@ -499,7 +526,10 @@ async def save_cmd(
                 e
             )
 
-        # Direct file link for admin
+        # ---------------------------------------------
+        # ADMIN CONFIRMATION
+        # ---------------------------------------------
+
         direct_link = (
             f"https://t.me/"
             f"{BOT_USERNAME}"
@@ -573,7 +603,10 @@ async def deliver_file(
     uid = update.effective_user.id
     chat_id = update.effective_chat.id
 
+    # ---------------------------------------------
     # SUBSCRIBED USER
+    # ---------------------------------------------
+
     if db.is_subscribed(uid):
 
         await send_file_with_auto_delete(
@@ -584,7 +617,10 @@ async def deliver_file(
 
         return
 
+    # ---------------------------------------------
     # NON-SUBSCRIBED USER
+    # ---------------------------------------------
+
     short_url = shortener.create(
         file_id=file_id,
         user_id=uid
@@ -640,6 +676,10 @@ async def deliver_batch(
     uid = update.effective_user.id
     chat_id = update.effective_chat.id
 
+    # ---------------------------------------------
+    # SUBSCRIBED USER
+    # ---------------------------------------------
+
     if db.is_subscribed(uid):
 
         await send_batch_with_auto_delete(
@@ -649,6 +689,10 @@ async def deliver_batch(
         )
 
         return
+
+    # ---------------------------------------------
+    # SHORTENER
+    # ---------------------------------------------
 
     short_url = shortener.create(
         file_id=f"batch:{batch_id}",
@@ -731,7 +775,10 @@ async def verify_token(
         update.effective_user.id
     )
 
-    # 0 = shareable token
+    # ---------------------------------------------
+    # PERSONAL TOKEN
+    # ---------------------------------------------
+
     if (
         token_user_id != 0
         and token_user_id != current_user_id
@@ -745,7 +792,10 @@ async def verify_token(
 
     chat_id = update.effective_chat.id
 
+    # ---------------------------------------------
     # BATCH
+    # ---------------------------------------------
+
     if target.startswith("batch:"):
 
         items = db.get_batch_items(
@@ -768,7 +818,10 @@ async def verify_token(
 
         return
 
+    # ---------------------------------------------
     # FILE
+    # ---------------------------------------------
+
     row = db.get_file(
         target
     )
@@ -804,4 +857,449 @@ async def batch_cmd(
 
     if not context.args:
 
-       
+        await update.message.reply_text(
+            "Usage: /batch <file_id> <file_id> ..."
+        )
+
+        return
+
+    valid = []
+
+    for file_id in context.args:
+
+        if db.get_file(file_id):
+            valid.append(file_id)
+
+    if not valid:
+
+        await update.message.reply_text(
+            "❌ No valid file IDs."
+        )
+
+        return
+
+    try:
+
+        batch_id = db.create_batch(
+            valid
+        )
+
+        link = (
+            f"https://t.me/"
+            f"{BOT_USERNAME}"
+            f"?start=batch_{batch_id}"
+        )
+
+        await update.message.reply_text(
+            f"📦 Batch created: {len(valid)} files\n\n"
+            f"🆔 {batch_id}\n"
+            f"🔗 {link}"
+        )
+
+    except Exception as e:
+
+        log.exception(
+            "BATCH ERROR"
+        )
+
+        await update.message.reply_text(
+            f"❌ Could not create batch:\n{e}"
+        )
+
+
+# =========================================================
+# ADD SUBSCRIPTION
+# =========================================================
+
+async def addsub_cmd(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not is_admin(
+        update.effective_user.id
+    ):
+        return
+
+    if len(context.args) != 2:
+
+        await update.message.reply_text(
+            "Usage: /addsub <user_id> <days>"
+        )
+
+        return
+
+    try:
+
+        user_id = int(
+            context.args[0]
+        )
+
+        days = int(
+            context.args[1]
+        )
+
+        db.add_subscription(
+            user_id,
+            days
+        )
+
+        await update.message.reply_text(
+            f"✅ Subscription added.\n\n"
+            f"👤 User: {user_id}\n"
+            f"📅 Days: {days}"
+        )
+
+    except ValueError:
+
+        await update.message.reply_text(
+            "❌ User ID and days must be numbers."
+        )
+
+    except Exception as e:
+
+        log.exception(
+            "ADDSUB ERROR"
+        )
+
+        await update.message.reply_text(
+            f"❌ Error:\n{e}"
+        )
+
+
+# =========================================================
+# REMOVE SUBSCRIPTION
+# =========================================================
+
+async def remsub_cmd(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not is_admin(
+        update.effective_user.id
+    ):
+        return
+
+    if len(context.args) != 1:
+
+        await update.message.reply_text(
+            "Usage: /remsub <user_id>"
+        )
+
+        return
+
+    try:
+
+        user_id = int(
+            context.args[0]
+        )
+
+        db.remove_subscription(
+            user_id
+        )
+
+        await update.message.reply_text(
+            "✅ Subscription removed."
+        )
+
+    except ValueError:
+
+        await update.message.reply_text(
+            "❌ User ID must be a number."
+        )
+
+
+# =========================================================
+# ADD ADMIN
+# =========================================================
+
+async def addadmin_cmd(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not is_owner(
+        update.effective_user.id
+    ):
+        return
+
+    if len(context.args) != 1:
+
+        await update.message.reply_text(
+            "Usage: /addadmin <user_id>"
+        )
+
+        return
+
+    try:
+
+        user_id = int(
+            context.args[0]
+        )
+
+        db.add_admin(
+            user_id
+        )
+
+        await update.message.reply_text(
+            f"✅ Admin added: {user_id}"
+        )
+
+    except ValueError:
+
+        await update.message.reply_text(
+            "❌ User ID must be a number."
+        )
+
+
+# =========================================================
+# REMOVE ADMIN
+# =========================================================
+
+async def removeadmin_cmd(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not is_owner(
+        update.effective_user.id
+    ):
+        return
+
+    if len(context.args) != 1:
+
+        await update.message.reply_text(
+            "Usage: /removeadmin <user_id>"
+        )
+
+        return
+
+    try:
+
+        user_id = int(
+            context.args[0]
+        )
+
+        db.remove_admin(
+            user_id
+        )
+
+        await update.message.reply_text(
+            f"✅ Admin removed: {user_id}"
+        )
+
+    except ValueError:
+
+        await update.message.reply_text(
+            "❌ User ID must be a number."
+        )
+
+
+# =========================================================
+# ADMINS
+# =========================================================
+
+async def admins_cmd(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not is_admin(
+        update.effective_user.id
+    ):
+        return
+
+    admins = db.list_admins()
+
+    text = (
+        f"👑 Owner: {OWNER_ID}\n\n"
+    )
+
+    if admins:
+
+        text += "\n".join(
+            f"• {user_id}"
+            for user_id in admins
+        )
+
+    else:
+
+        text += "• No additional admins"
+
+    await update.message.reply_text(
+        text
+    )
+
+
+# =========================================================
+# STATS
+# =========================================================
+
+async def stats_cmd(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not is_admin(
+        update.effective_user.id
+    ):
+        return
+
+    try:
+
+        stats = db.stats()
+
+        await update.message.reply_text(
+            "📊 Statistics\n\n"
+            f"📁 Files: {stats['files']}\n"
+            f"📦 Batches: {stats['batches']}\n"
+            f"👑 Admins: {stats['admins']}\n"
+            f"👤 Active subscriptions: "
+            f"{stats['subscriptions']}"
+        )
+
+    except Exception as e:
+
+        log.exception(
+            "STATS ERROR"
+        )
+
+        await update.message.reply_text(
+            f"❌ Error:\n{e}"
+        )
+
+
+# =========================================================
+# MAIN
+# =========================================================
+
+def main():
+
+    # ---------------------------------------------
+    # START RENDER HEALTH SERVER
+    # ---------------------------------------------
+
+    health_thread = threading.Thread(
+        target=start_health_server,
+        daemon=True
+    )
+
+    health_thread.start()
+
+    # ---------------------------------------------
+    # CREATE TELEGRAM APPLICATION
+    # ---------------------------------------------
+
+    app = (
+        Application
+        .builder()
+        .token(BOT_TOKEN)
+        .build()
+    )
+
+    # ---------------------------------------------
+    # COMMAND HANDLERS
+    # ---------------------------------------------
+
+    app.add_handler(
+        CommandHandler(
+            "start",
+            start
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "help",
+            help_cmd
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "save",
+            save_cmd
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "get",
+            get_cmd
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "verify",
+            verify_cmd
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "batch",
+            batch_cmd
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "addsub",
+            addsub_cmd
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "remsub",
+            remsub_cmd
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "addadmin",
+            addadmin_cmd
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "removeadmin",
+            removeadmin_cmd
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "admins",
+            admins_cmd
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "stats",
+            stats_cmd
+        )
+    )
+
+    # ---------------------------------------------
+    # START BOT
+    # ---------------------------------------------
+
+    log.info("🔥 Bot starting on Render...")
+
+    app.run_polling(
+        drop_pending_updates=True
+    )
+
+
+# =========================================================
+# ENTRY POINT
+# =========================================================
+
+if __name__ == "__main__":
+    main()

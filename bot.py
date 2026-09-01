@@ -1,3 +1,5 @@
+print("🔥 BOT.PY STARTED", flush=True)
+print("🔥 Python process is running", flush=True)
 import os
 import asyncio
 import logging

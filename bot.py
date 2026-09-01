@@ -1,5 +1,3 @@
-print("🔥 BOT.PY STARTED", flush=True)
-print("🔥 Python process is running", flush=True)
 import os
 import asyncio
 import logging
@@ -26,31 +24,59 @@ logging.basicConfig(
 
 log = logging.getLogger(__name__)
 
+print("🔥 BOT.PY STARTED", flush=True)
+
 
 # =========================================================
 # ENVIRONMENT VARIABLES
 # =========================================================
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-OWNER_ID = int(os.environ["OWNER_ID"])
-DB_CHANNEL_ID = int(os.environ["DB_CHANNEL_ID"])
-BOT_USERNAME = os.environ["BOT_USERNAME"].lstrip("@")
+try:
+    BOT_TOKEN = os.environ["BOT_TOKEN"]
+    OWNER_ID = int(os.environ["OWNER_ID"])
+    DB_CHANNEL_ID = int(os.environ["DB_CHANNEL_ID"])
+    BOT_USERNAME = os.environ["BOT_USERNAME"].lstrip("@")
+
+    print("🔥 Environment variables loaded", flush=True)
+
+except Exception as e:
+    print("❌ ENVIRONMENT ERROR:", repr(e), flush=True)
+    raise
 
 
 # =========================================================
-# DATABASE + SHORTENER
+# DATABASE
 # =========================================================
 
-db = Database(
-    os.getenv("DATABASE_PATH", "bot.db")
-)
+try:
+    db = Database(
+        os.getenv("DATABASE_PATH", "bot.db")
+    )
 
-shortener = Shortener(
-    os.getenv("SHORTENER_API_URL", ""),
-    os.getenv("SHORTENER_API_KEY", ""),
-    BOT_USERNAME,
-    db,
-)
+    print("🔥 Database initialized", flush=True)
+
+except Exception as e:
+    print("❌ DATABASE ERROR:", repr(e), flush=True)
+    raise
+
+
+# =========================================================
+# SHORTENER
+# =========================================================
+
+try:
+    shortener = Shortener(
+        os.getenv("SHORTENER_API_URL", ""),
+        os.getenv("SHORTENER_API_KEY", ""),
+        BOT_USERNAME,
+        db,
+    )
+
+    print("🔥 Shortener initialized", flush=True)
+
+except Exception as e:
+    print("❌ SHORTENER INIT ERROR:", repr(e), flush=True)
+    raise
 
 
 # =========================================================
@@ -67,6 +93,7 @@ DELETE_AFTER_SECONDS = 600
 class HealthHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
+
         self.send_response(200)
 
         self.send_header(
@@ -86,31 +113,44 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 def start_health_server():
 
-    port = int(
-        os.environ.get(
-            "PORT",
-            "10000"
+    try:
+
+        port = int(
+            os.environ.get(
+                "PORT",
+                "10000"
+            )
         )
-    )
 
-    server = HTTPServer(
-        ("0.0.0.0", port),
-        HealthHandler
-    )
+        server = HTTPServer(
+            ("0.0.0.0", port),
+            HealthHandler
+        )
 
-    log.info(
-        "Health server running on port %s",
-        port
-    )
+        print(
+            f"🔥 Health server running on port {port}",
+            flush=True
+        )
 
-    server.serve_forever()
+        server.serve_forever()
+
+    except Exception as e:
+
+        print(
+            "❌ HEALTH SERVER ERROR:",
+            repr(e),
+            flush=True
+        )
+
+        raise
 
 
 # =========================================================
-# ADMIN CHECKS
+# ADMIN
 # =========================================================
 
 def is_admin(user_id: int) -> bool:
+
     return (
         user_id == OWNER_ID
         or db.is_admin(user_id)
@@ -118,6 +158,7 @@ def is_admin(user_id: int) -> bool:
 
 
 def is_owner(user_id: int) -> bool:
+
     return user_id == OWNER_ID
 
 
@@ -139,7 +180,7 @@ async def copy_stored_message(
 
 
 # =========================================================
-# DELETE AFTER 10 MINUTES
+# DELETE MESSAGES AFTER 10 MINUTES
 # =========================================================
 
 async def delete_after_10_minutes(
@@ -176,9 +217,8 @@ async def delete_after_10_minutes(
             )
 
             log.info(
-                "Deleted message %s from chat %s",
-                message_id,
-                chat_id
+                "Deleted message %s",
+                message_id
             )
 
         except Exception as e:
@@ -191,7 +231,7 @@ async def delete_after_10_minutes(
 
 
 # =========================================================
-# SEND FILE + AUTO DELETE
+# SEND FILE WITH AUTO DELETE
 # =========================================================
 
 async def send_file_with_auto_delete(
@@ -209,8 +249,8 @@ async def send_file_with_auto_delete(
     warning_message = await context.bot.send_message(
         chat_id=chat_id,
         text=(
-            "⏳ This file will be "
-            "automatically deleted in 10 minutes."
+            "⏳ This file will be automatically "
+            "deleted in 10 minutes."
         )
     )
 
@@ -225,7 +265,7 @@ async def send_file_with_auto_delete(
 
 
 # =========================================================
-# SEND BATCH + AUTO DELETE
+# SEND BATCH WITH AUTO DELETE
 # =========================================================
 
 async def send_batch_with_auto_delete(
@@ -298,7 +338,7 @@ async def start(
         else ""
     )
 
-    # FILE LINK
+    # FILE
     if arg.startswith("file_"):
 
         await deliver_file(
@@ -309,7 +349,7 @@ async def start(
 
         return
 
-    # BATCH LINK
+    # BATCH
     if arg.startswith("batch_"):
 
         await deliver_batch(
@@ -320,7 +360,7 @@ async def start(
 
         return
 
-    # VERIFY LINK
+    # VERIFY
     if arg.startswith("verify_"):
 
         await verify_token(
@@ -331,7 +371,6 @@ async def start(
 
         return
 
-    # NORMAL START
     await update.message.reply_text(
         "👋 Welcome!\n\n"
         "Use a file/batch link to receive files.\n\n"
@@ -351,15 +390,14 @@ async def help_cmd(
     await update.message.reply_text(
         "📚 Commands\n\n"
         "/get <file_id> — get a file\n"
-        "/batch <file_id> ... — create a batch (admin)\n"
-        "/save — save a replied file/post (admin)\n"
+        "/save — save replied file/post (admin)\n"
+        "/batch <file_id> ... — create batch (admin)\n"
         "/addsub <user_id> <days> — add subscription\n"
         "/remsub <user_id> — remove subscription\n"
         "/addadmin <user_id> — owner only\n"
         "/removeadmin <user_id> — owner only\n"
         "/admins — list admins\n"
-        "/stats — statistics (admin)\n\n"
-        "To store a file/post, reply to it with /save."
+        "/stats — statistics (admin)"
     )
 
 
@@ -389,27 +427,27 @@ async def save_cmd(
 
     try:
 
-        # Copy original post to DB channel
+        # Copy to DB channel
         copied = await context.bot.copy_message(
             chat_id=DB_CHANNEL_ID,
             from_chat_id=msg.chat_id,
             message_id=msg.message_id
         )
 
-        # Save in database
+        # Save DB record
         file_id = db.add_file(
             DB_CHANNEL_ID,
             copied.message_id,
             msg.caption or ""
         )
 
-        log.info(
-            "File saved: %s",
-            file_id
+        print(
+            f"🔥 File saved: {file_id}",
+            flush=True
         )
 
         # Create SHAREABLE shortener token
-        # user_id=0 means token can be used by anyone
+        # user_id=0 means anyone can use it
         short_url = shortener.create(
             file_id=file_id,
             user_id=0
@@ -420,13 +458,12 @@ async def save_cmd(
             await update.message.reply_text(
                 f"⚠️ File saved.\n\n"
                 f"🆔 {file_id}\n\n"
-                "❌ AroLinks shortener link "
-                "could not be created."
+                "❌ Could not create shortener link."
             )
 
             return
 
-        # Telegram Share URL
+        # Telegram share URL
         share_url = (
             "https://telegram.me/share/url?url="
             + quote(
@@ -435,7 +472,6 @@ async def save_cmd(
             )
         )
 
-        # Button
         keyboard = InlineKeyboardMarkup(
             [
                 [
@@ -447,14 +483,23 @@ async def save_cmd(
             ]
         )
 
-        # Put button below DB channel post
-        await context.bot.edit_message_reply_markup(
-            chat_id=DB_CHANNEL_ID,
-            message_id=copied.message_id,
-            reply_markup=keyboard
-        )
+        # Add button below DB channel post
+        try:
 
-        # Normal direct file link
+            await context.bot.edit_message_reply_markup(
+                chat_id=DB_CHANNEL_ID,
+                message_id=copied.message_id,
+                reply_markup=keyboard
+            )
+
+        except Exception as e:
+
+            log.warning(
+                "Could not add button to DB post: %s",
+                e
+            )
+
+        # Direct file link for admin
         direct_link = (
             f"https://t.me/"
             f"{BOT_USERNAME}"
@@ -465,14 +510,13 @@ async def save_cmd(
             f"✅ File saved successfully!\n\n"
             f"🆔 {file_id}\n"
             f"🔗 {direct_link}\n\n"
-            "📤 Share Link button added "
-            "to DB channel."
+            "📤 Share Link button added to DB channel."
         )
 
     except Exception as e:
 
         log.exception(
-            "save failed"
+            "SAVE ERROR"
         )
 
         await update.message.reply_text(
@@ -596,7 +640,6 @@ async def deliver_batch(
     uid = update.effective_user.id
     chat_id = update.effective_chat.id
 
-    # SUBSCRIBED USER
     if db.is_subscribed(uid):
 
         await send_batch_with_auto_delete(
@@ -607,7 +650,6 @@ async def deliver_batch(
 
         return
 
-    # NON-SUBSCRIBED USER
     short_url = shortener.create(
         file_id=f"batch:{batch_id}",
         user_id=uid
@@ -622,8 +664,7 @@ async def deliver_batch(
         return
 
     await update.effective_message.reply_text(
-        f"📦 This batch contains "
-        f"{len(items)} files.\n\n"
+        f"📦 This batch contains {len(items)} files.\n\n"
         "Complete the shortener to unlock the batch.",
         reply_markup=InlineKeyboardMarkup(
             [
@@ -690,4 +731,77 @@ async def verify_token(
         update.effective_user.id
     )
 
-    # user_id=0 =
+    # 0 = shareable token
+    if (
+        token_user_id != 0
+        and token_user_id != current_user_id
+    ):
+
+        await update.effective_message.reply_text(
+            "❌ This token belongs to another user."
+        )
+
+        return
+
+    chat_id = update.effective_chat.id
+
+    # BATCH
+    if target.startswith("batch:"):
+
+        items = db.get_batch_items(
+            target[6:]
+        )
+
+        if not items:
+
+            await update.effective_message.reply_text(
+                "❌ Batch not found or empty."
+            )
+
+            return
+
+        await send_batch_with_auto_delete(
+            context,
+            chat_id,
+            items
+        )
+
+        return
+
+    # FILE
+    row = db.get_file(
+        target
+    )
+
+    if not row:
+
+        await update.effective_message.reply_text(
+            "❌ File not found."
+        )
+
+        return
+
+    await send_file_with_auto_delete(
+        context,
+        chat_id,
+        row
+    )
+
+
+# =========================================================
+# BATCH COMMAND
+# =========================================================
+
+async def batch_cmd(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not is_admin(
+        update.effective_user.id
+    ):
+        return
+
+    if not context.args:
+
+       

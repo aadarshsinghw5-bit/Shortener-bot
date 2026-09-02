@@ -499,14 +499,33 @@ async def start(
 
         return
 
-    await send_text(
-        update,
-        (
-            "👋 <b>Welcome!</b>\n\n"
-            "Send a valid file link to receive your file.\n\n"
-            "Use /help to see available commands."
-        ),
-        parse_mode="HTML"
+    await update.message.reply_photo(
+    photo="e42c90c0dfb1",
+    caption=(
+        f"⚡ <b>HEY, {update.effective_user.first_name} ~</b>\n\n"
+        "I AM FILE STORE BOT, I CAN STORE PRIVATE "
+        "FILES IN SPECIFIED CHANNEL AND OTHER USERS "
+        "CAN ACCESS IT FROM SPECIAL LINK."
+    ),
+    parse_mode="HTML",
+    reply_markup=InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "↗ • ANIME HUB",
+                url="https://t.me/Anime_Hub_94"
+            ),
+            InlineKeyboardButton(
+                "ABOUT •",
+                callback_data="about"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "• CLOSE •",
+                callback_data="close"
+            )
+        ]
+    ])
     )
 
 

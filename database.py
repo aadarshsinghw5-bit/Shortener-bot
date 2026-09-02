@@ -2,296 +2,136 @@ import os
 import uuid
 from datetime import datetime, timedelta, timezone
 
-import psycopg2
-from psycopg2.extras import RealDictCursor
+from supabase import create_client
 
 
 class Database:
 
-    def __init__(self, path=None):
-        self.url = os.getenv("DATABASE_URL")
+    def __init__(self):
+        url = os.environ["SUPABASE_URL"]
+        key = os.environ["SUPABASE_KEY"]
+        self.db = create_client(url, key)
 
-        if not self.url:
-            raise RuntimeError("DATABASE_URL is not set")
-
-        self.init()
-
-    def connect(self):
-        return psycopg2.connect(self.url)
-
-    def init(self):
-
-        with self.connect() as db:
-            with db.cursor() as c:
-
-                c.execute("""
-                    CREATE TABLE IF NOT EXISTS users (
-                        user_id BIGINT PRIMARY KEY,
-                        username TEXT DEFAULT '',
-                        first_name TEXT DEFAULT '',
-                        created_at TIMESTAMPTZ DEFAULT NOW()
-                    )
-                """)
-
-                c.execute("""
-                    CREATE TABLE IF NOT EXISTS admins (
-                        user_id BIGINT PRIMARY KEY
-                    )
-                """)
-
-                c.execute("""
-                    CREATE TABLE IF NOT EXISTS premium (
-                        user_id BIGINT PRIMARY KEY,
-                        expires_at TIMESTAMPTZ NOT NULL
-                    )
-                """)
-
-                c.execute("""
-                    CREATE TABLE IF NOT EXISTS banned_users (
-                        user_id BIGINT PRIMARY KEY,
-                        banned_by BIGINT,
-                        banned_at TIMESTAMPTZ DEFAULT NOW()
-                    )
-                """)
-
-                c.execute("""
-                    CREATE TABLE IF NOT EXISTS files (
-                        file_id TEXT PRIMARY KEY,
-                        channel_id BIGINT NOT NULL,
-                        message_id BIGINT NOT NULL,
-                        caption TEXT DEFAULT ''
-                    )
-                """)
-
-                c.execute("""
-                    CREATE TABLE IF NOT EXISTS batches (
-                        batch_id TEXT PRIMARY KEY,
-                        created_at TIMESTAMPTZ DEFAULT NOW()
-                    )
-                """)
-
-                c.execute("""
-                    CREATE TABLE IF NOT EXISTS batch_items (
-                        batch_id TEXT NOT NULL,
-                        file_id TEXT NOT NULL,
-                        position INTEGER NOT NULL,
-                        PRIMARY KEY(batch_id, file_id)
-                    )
-                """)
-
-                c.execute("""
-                    CREATE TABLE IF NOT EXISTS tokens (
-                        token TEXT PRIMARY KEY,
-                        user_id BIGINT NOT NULL,
-                        target TEXT NOT NULL,
-                        expires_at TIMESTAMPTZ NOT NULL,
-                        used BOOLEAN DEFAULT FALSE
-                    )
-                """)
-
-                c.execute("""
-                    CREATE TABLE IF NOT EXISTS fsub_channels (
-                        channel_id TEXT PRIMARY KEY,
-                        invite_link TEXT DEFAULT '',
-                        title TEXT DEFAULT ''
-                    )
-                """)
-
-                c.execute("""
-                    CREATE TABLE IF NOT EXISTS requests (
-                        request_id TEXT PRIMARY KEY,
-                        user_id BIGINT NOT NULL,
-                        request_text TEXT NOT NULL,
-                        created_at TIMESTAMPTZ DEFAULT NOW()
-                    )
-                """)
-
-                c.execute("""
-                    CREATE TABLE IF NOT EXISTS settings (
-                        key TEXT PRIMARY KEY,
-                        value TEXT
-                    )
-                """)
-
-            db.commit()
-
-    # =====================================================
+    # =========================
     # USERS
-    # =====================================================
+    # =========================
 
     def add_user(self, user_id, username="", first_name=""):
-
-        with self.connect() as db:
-            with db.cursor() as c:
-
-                c.execute("""
-                    INSERT INTO users(user_id, username, first_name)
-                    VALUES(%s, %s, %s)
-                    ON CONFLICT(user_id)
-                    DO UPDATE SET
-                        username = EXCLUDED.username,
-                        first_name = EXCLUDED.first_name
-                """, (
-                    user_id,
-                    username,
-                    first_name
-                ))
-
-            db.commit()
+        self.db.table("users").upsert({
+            "user_id": user_id,
+            "username": username or "",
+            "first_name": first_name or "",
+        }).execute()
 
     def list_users(self):
-
-        with self.connect() as db:
-            with db.cursor() as c:
-
-                c.execute("""
-                    SELECT user_id
-                    FROM users
-                    ORDER BY user_id
-                """)
-
-                return [r[0] for r in c.fetchall()]
+        r = self.db.table("users").select("user_id").execute()
+        return [x["user_id"] for x in (r.data or [])]
 
     def user_count(self):
+        r = self.db.table("users").select(
+            "user_id", count="exact"
+        ).execute()
+        return r.count or 0
 
-        with self.connect() as db:
-            with db.cursor() as c:
-
-                c.execute("SELECT COUNT(*) FROM users")
-
-                return c.fetchone()[0]
-
-    # =====================================================
+    # =========================
     # ADMINS
-    # =====================================================
+    # =========================
 
     def add_admin(self, user_id):
-
-        with self.connect() as db:
-            with db.cursor() as c:
-                c.execute(
-                    "INSERT INTO admins(user_id) VALUES(%s) ON CONFLICT DO NOTHING",
-                    (user_id,)
-                )
-            db.commit()
+        self.db.table("admins").upsert({
+            "user_id": user_id
+        }).execute()
 
     def remove_admin(self, user_id):
-
-        with self.connect() as db:
-            with db.cursor() as c:
-                c.execute(
-                    "DELETE FROM admins WHERE user_id=%s",
-                    (user_id,)
-                )
-            db.commit()
+        self.db.table("admins").delete().eq(
+            "user_id", user_id
+        ).execute()
 
     def is_admin(self, user_id):
+        r = self.db.table("admins").select(
+            "user_id"
+        ).eq("user_id", user_id).limit(1).execute()
 
-        with self.connect() as db:
-            with db.cursor() as c:
-
-                c.execute(
-                    "SELECT 1 FROM admins WHERE user_id=%s",
-                    (user_id,)
-                )
-
-                return c.fetchone() is not None
+        return bool(r.data)
 
     def list_admins(self):
+        r = self.db.table("admins").select(
+            "user_id"
+        ).order("user_id").execute()
 
-        with self.connect() as db:
-            with db.cursor() as c:
+        return [x["user_id"] for x in (r.data or [])]
 
-                c.execute(
-                    "SELECT user_id FROM admins ORDER BY user_id"
-                )
-
-                return [r[0] for r in c.fetchall()]
-
-    # =====================================================
+    # =========================
     # PREMIUM
-    # =====================================================
+    # =========================
 
     def add_premium(self, user_id, days):
-
         now = datetime.now(timezone.utc)
 
-        with self.connect() as db:
-            with db.cursor() as c:
+        old = self.get_premium(user_id)
 
-                c.execute(
-                    "SELECT expires_at FROM premium WHERE user_id=%s",
-                    (user_id,)
+        if old:
+            try:
+                old_expiry = datetime.fromisoformat(
+                    old["expires_at"].replace("Z", "+00:00")
                 )
+                base = max(now, old_expiry)
+            except Exception:
+                base = now
+        else:
+            base = now
 
-                row = c.fetchone()
+        expires = base + timedelta(days=days)
 
-                if row and row[0] > now:
-                    base = row[0]
-                else:
-                    base = now
-
-                expires = base + timedelta(days=days)
-
-                c.execute("""
-                    INSERT INTO premium(user_id, expires_at)
-                    VALUES(%s, %s)
-                    ON CONFLICT(user_id)
-                    DO UPDATE SET expires_at=EXCLUDED.expires_at
-                """, (
-                    user_id,
-                    expires
-                ))
-
-            db.commit()
+        self.db.table("premium").upsert({
+            "user_id": user_id,
+            "expires_at": expires.isoformat()
+        }).execute()
 
     def remove_premium(self, user_id):
-
-        with self.connect() as db:
-            with db.cursor() as c:
-
-                c.execute(
-                    "DELETE FROM premium WHERE user_id=%s",
-                    (user_id,)
-                )
-
-            db.commit()
+        self.db.table("premium").delete().eq(
+            "user_id", user_id
+        ).execute()
 
     def get_premium(self, user_id):
+        r = self.db.table("premium").select(
+            "*"
+        ).eq("user_id", user_id).limit(1).execute()
 
-        with self.connect() as db:
-            with db.cursor(cursor_factory=RealDictCursor) as c:
+        if not r.data:
+            return None
 
-                c.execute("""
-                    SELECT user_id, expires_at
-                    FROM premium
-                    WHERE user_id=%s
-                      AND expires_at > NOW()
-                """, (user_id,))
+        row = r.data[0]
 
-                return c.fetchone()
+        try:
+            expiry = datetime.fromisoformat(
+                row["expires_at"].replace("Z", "+00:00")
+            )
+
+            if expiry <= datetime.now(timezone.utc):
+                self.remove_premium(user_id)
+                return None
+
+        except Exception:
+            return None
+
+        return row
 
     def is_premium(self, user_id):
-
         return self.get_premium(user_id) is not None
 
     def list_premium(self):
+        now = datetime.now(timezone.utc).isoformat()
 
-        with self.connect() as db:
-            with db.cursor(cursor_factory=RealDictCursor) as c:
+        r = self.db.table("premium").select(
+            "*"
+        ).gt("expires_at", now).order("expires_at").execute()
 
-                c.execute("""
-                    SELECT user_id, expires_at
-                    FROM premium
-                    WHERE expires_at > NOW()
-                    ORDER BY expires_at
-                """)
+        return r.data or []
 
-                return c.fetchall()
-
-    # =====================================================
-    # LEGACY SUBSCRIPTION SUPPORT
-    # =====================================================
+    # =========================
+    # OLD SUBSCRIPTION ALIASES
+    # =========================
 
     def add_subscription(self, user_id, days):
         self.add_premium(user_id, days)
@@ -302,165 +142,108 @@ class Database:
     def is_subscribed(self, user_id):
         return self.is_premium(user_id)
 
-    # =====================================================
-    # BAN SYSTEM
-    # =====================================================
+    # =========================
+    # BANNED USERS
+    # =========================
 
     def ban_user(self, user_id, banned_by):
-
-        with self.connect() as db:
-            with db.cursor() as c:
-
-                c.execute("""
-                    INSERT INTO banned_users(user_id, banned_by)
-                    VALUES(%s, %s)
-                    ON CONFLICT(user_id)
-                    DO UPDATE SET
-                        banned_by=EXCLUDED.banned_by,
-                        banned_at=NOW()
-                """, (
-                    user_id,
-                    banned_by
-                ))
-
-            db.commit()
+        self.db.table("banned_users").upsert({
+            "user_id": user_id,
+            "banned_by": banned_by
+        }).execute()
 
     def unban_user(self, user_id):
-
-        with self.connect() as db:
-            with db.cursor() as c:
-
-                c.execute(
-                    "DELETE FROM banned_users WHERE user_id=%s",
-                    (user_id,)
-                )
-
-            db.commit()
+        self.db.table("banned_users").delete().eq(
+            "user_id", user_id
+        ).execute()
 
     def is_banned(self, user_id):
+        r = self.db.table("banned_users").select(
+            "user_id"
+        ).eq("user_id", user_id).limit(1).execute()
 
-        with self.connect() as db:
-            with db.cursor() as c:
-
-                c.execute(
-                    "SELECT 1 FROM banned_users WHERE user_id=%s",
-                    (user_id,)
-                )
-
-                return c.fetchone() is not None
+        return bool(r.data)
 
     def list_banned(self):
+        r = self.db.table("banned_users").select(
+            "*"
+        ).order("created_at").execute()
 
-        with self.connect() as db:
-            with db.cursor(cursor_factory=RealDictCursor) as c:
+        return r.data or []
 
-                c.execute("""
-                    SELECT user_id, banned_by, banned_at
-                    FROM banned_users
-                    ORDER BY banned_at DESC
-                """)
-
-                return c.fetchall()
-
-    # =====================================================
+    # =========================
     # FILES
-    # =====================================================
+    # =========================
 
     def add_file(self, channel_id, message_id, caption=""):
-
         file_id = uuid.uuid4().hex[:12]
 
-        with self.connect() as db:
-            with db.cursor() as c:
-
-                c.execute("""
-                    INSERT INTO files(
-                        file_id,
-                        channel_id,
-                        message_id,
-                        caption
-                    )
-                    VALUES(%s, %s, %s, %s)
-                """, (
-                    file_id,
-                    int(channel_id),
-                    int(message_id),
-                    caption or ""
-                ))
-
-            db.commit()
+        self.db.table("files").insert({
+            "file_id": file_id,
+            "channel_id": int(channel_id),
+            "message_id": int(message_id),
+            "caption": caption or ""
+        }).execute()
 
         return file_id
 
     def get_file(self, file_id):
+        r = self.db.table("files").select(
+            "*"
+        ).eq("file_id", file_id).limit(1).execute()
 
-        with self.connect() as db:
-            with db.cursor(cursor_factory=RealDictCursor) as c:
+        if not r.data:
+            return None
 
-                c.execute(
-                    "SELECT * FROM files WHERE file_id=%s",
-                    (file_id,)
-                )
+        return r.data[0]
 
-                return c.fetchone()
-
-    # =====================================================
-    # BATCH
-    # =====================================================
+    # =========================
+    # BATCHES
+    # =========================
 
     def create_batch(self, file_ids):
-
         batch_id = uuid.uuid4().hex[:12]
 
-        with self.connect() as db:
-            with db.cursor() as c:
+        self.db.table("batches").insert({
+            "batch_id": batch_id
+        }).execute()
 
-                c.execute(
-                    "INSERT INTO batches(batch_id) VALUES(%s)",
-                    (batch_id,)
-                )
+        rows = []
 
-                for position, file_id in enumerate(file_ids):
+        for position, file_id in enumerate(file_ids):
+            rows.append({
+                "batch_id": batch_id,
+                "file_id": file_id,
+                "position": position
+            })
 
-                    c.execute("""
-                        INSERT INTO batch_items(
-                            batch_id,
-                            file_id,
-                            position
-                        )
-                        VALUES(%s, %s, %s)
-                    """, (
-                        batch_id,
-                        file_id,
-                        position
-                    ))
-
-            db.commit()
+        if rows:
+            self.db.table("batch_items").insert(rows).execute()
 
         return batch_id
 
     def get_batch_items(self, batch_id):
+        r = self.db.table("batch_items").select(
+            "file_id, position"
+        ).eq(
+            "batch_id", batch_id
+        ).order("position").execute()
 
-        with self.connect() as db:
-            with db.cursor(cursor_factory=RealDictCursor) as c:
+        result = []
 
-                c.execute("""
-                    SELECT f.*
-                    FROM batch_items b
-                    JOIN files f
-                      ON f.file_id=b.file_id
-                    WHERE b.batch_id=%s
-                    ORDER BY b.position
-                """, (batch_id,))
+        for item in (r.data or []):
+            file_row = self.get_file(item["file_id"])
 
-                return c.fetchall()
+            if file_row:
+                result.append(file_row)
 
-    # =====================================================
+        return result
+
+    # =========================
     # SHORTENER TOKENS
-    # =====================================================
+    # =========================
 
     def create_token(self, user_id, target, hours=2):
-
         token = uuid.uuid4().hex
 
         expires = (
@@ -468,211 +251,174 @@ class Database:
             + timedelta(hours=hours)
         )
 
-        with self.connect() as db:
-            with db.cursor() as c:
-
-                c.execute("""
-                    INSERT INTO tokens(
-                        token,
-                        user_id,
-                        target,
-                        expires_at,
-                        used
-                    )
-                    VALUES(%s, %s, %s, %s, FALSE)
-                """, (
-                    token,
-                    user_id,
-                    target,
-                    expires
-                ))
-
-            db.commit()
+        self.db.table("tokens").insert({
+            "token": token,
+            "user_id": int(user_id),
+            "target": target,
+            "expires_at": expires.isoformat(),
+            "used": False
+        }).execute()
 
         return token
 
     def consume_token(self, token):
+        r = self.db.table("tokens").select(
+            "*"
+        ).eq("token", token).limit(1).execute()
 
-        with self.connect() as db:
-            with db.cursor(cursor_factory=RealDictCursor) as c:
+        if not r.data:
+            return None
 
-                c.execute("""
-                    SELECT *
-                    FROM tokens
-                    WHERE token=%s
-                      AND used=FALSE
-                      AND expires_at > NOW()
-                    FOR UPDATE
-                """, (token,))
+        row = r.data[0]
 
-                row = c.fetchone()
+        if row.get("used"):
+            return None
 
-                if not row:
-                    return None
+        try:
+            expiry = datetime.fromisoformat(
+                row["expires_at"].replace("Z", "+00:00")
+            )
 
-                c.execute("""
-                    UPDATE tokens
-                    SET used=TRUE
-                    WHERE token=%s
-                """, (token,))
+            if expiry <= datetime.now(timezone.utc):
+                return None
 
-            db.commit()
+        except Exception:
+            return None
+
+        self.db.table("tokens").update({
+            "used": True
+        }).eq("token", token).execute()
 
         return row["user_id"], row["target"]
 
-    # =====================================================
-    # FORCE SUB
-    # =====================================================
+    # =========================
+    # FSUB
+    # =========================
 
-    def add_fsub(self, channel_id, invite_link="", title=""):
-
-        with self.connect() as db:
-            with db.cursor() as c:
-
-                c.execute("""
-                    INSERT INTO fsub_channels(
-                        channel_id,
-                        invite_link,
-                        title
-                    )
-                    VALUES(%s, %s, %s)
-                    ON CONFLICT(channel_id)
-                    DO UPDATE SET
-                        invite_link=EXCLUDED.invite_link,
-                        title=EXCLUDED.title
-                """, (
-                    str(channel_id),
-                    invite_link or "",
-                    title or ""
-                ))
-
-            db.commit()
+    def add_fsub(
+        self,
+        channel_id,
+        invite_link="",
+        title=""
+    ):
+        self.db.table("fsub_channels").upsert({
+            "channel_id": str(channel_id),
+            "invite_link": invite_link or "",
+            "title": title or str(channel_id)
+        }).execute()
 
     def del_fsub(self, channel_id):
-
-        with self.connect() as db:
-            with db.cursor() as c:
-
-                c.execute(
-                    "DELETE FROM fsub_channels WHERE channel_id=%s",
-                    (str(channel_id),)
-                )
-
-            db.commit()
+        self.db.table("fsub_channels").delete().eq(
+            "channel_id", str(channel_id)
+        ).execute()
 
     def list_fsub(self):
+        r = self.db.table("fsub_channels").select(
+            "*"
+        ).order("title").execute()
 
-        with self.connect() as db:
-            with db.cursor(cursor_factory=RealDictCursor) as c:
+        return r.data or []
 
-                c.execute("""
-                    SELECT channel_id, invite_link, title
-                    FROM fsub_channels
-                    ORDER BY title
-                """)
-
-                return c.fetchall()
-
-    # =====================================================
+    # =========================
     # REQUESTS
-    # =====================================================
+    # =========================
 
-    def add_request(self, user_id, request_text):
+    def add_request(self, user_id, request):
+        r = self.db.table("requests").insert({
+            "user_id": int(user_id),
+            "request": request
+        }).execute()
 
-        request_id = uuid.uuid4().hex[:8]
+        if r.data:
+            return r.data[0]["id"]
 
-        with self.connect() as db:
-            with db.cursor() as c:
+        return None
 
-                c.execute("""
-                    INSERT INTO requests(
-                        request_id,
-                        user_id,
-                        request_text
-                    )
-                    VALUES(%s, %s, %s)
-                """, (
-                    request_id,
-                    user_id,
-                    request_text
-                ))
-
-            db.commit()
-
-        return request_id
-
-    # =====================================================
+    # =========================
     # SETTINGS
-    # =====================================================
+    # =========================
 
     def set_setting(self, key, value):
-
-        with self.connect() as db:
-            with db.cursor() as c:
-
-                c.execute("""
-                    INSERT INTO settings(key, value)
-                    VALUES(%s, %s)
-                    ON CONFLICT(key)
-                    DO UPDATE SET value=EXCLUDED.value
-                """, (
-                    key,
-                    value
-                ))
-
-            db.commit()
+        self.db.table("settings").upsert({
+            "key": key,
+            "value": str(value)
+        }).execute()
 
     def get_setting(self, key, default=None):
+        r = self.db.table("settings").select(
+            "value"
+        ).eq("key", key).limit(1).execute()
 
-        with self.connect() as db:
-            with db.cursor() as c:
+        if not r.data:
+            return default
 
-                c.execute(
-                    "SELECT value FROM settings WHERE key=%s",
-                    (key,)
-                )
+        return r.data[0]["value"]
 
-                row = c.fetchone()
+    def get_delete_seconds(self):
+        value = self.get_setting(
+            "delete_seconds",
+            "600"
+        )
 
-                return row[0] if row else default
+        try:
+            return max(0, int(value))
+        except Exception:
+            return 600
 
-    # =====================================================
-    # STATS
-    # =====================================================
+    # =========================
+    # PENDING AUTO DELETE
+    # =========================
+
+    def add_pending_delete(
+        self,
+        chat_id,
+        message_id,
+        delete_at
+    ):
+        r = self.db.table("pending_deletes").insert({
+            "chat_id": int(chat_id),
+            "message_id": int(message_id),
+            "delete_at": delete_at.isoformat(),
+            "deleted": False
+        }).execute()
+
+        if r.data:
+            return r.data[0]["id"]
+
+        return None
+
+    def get_pending_deletes(self):
+        r = self.db.table("pending_deletes").select(
+            "*"
+        ).eq(
+            "deleted", False
+        ).execute()
+
+        return r.data or []
+
+    def mark_delete_done(self, delete_id):
+        self.db.table("pending_deletes").update({
+            "deleted": True
+        }).eq("id", delete_id).execute()
+
+    # =========================
+    # STATISTICS
+    # =========================
+
+    def _count(self, table):
+        r = self.db.table(table).select(
+            "*",
+            count="exact"
+        ).limit(1).execute()
+
+        return r.count or 0
 
     def stats(self):
-
-        with self.connect() as db:
-            with db.cursor() as c:
-
-                c.execute("SELECT COUNT(*) FROM files")
-                files = c.fetchone()[0]
-
-                c.execute("SELECT COUNT(*) FROM batches")
-                batches = c.fetchone()[0]
-
-                c.execute("SELECT COUNT(*) FROM admins")
-                admins = c.fetchone()[0]
-
-                c.execute("""
-                    SELECT COUNT(*)
-                    FROM premium
-                    WHERE expires_at > NOW()
-                """)
-                premium = c.fetchone()[0]
-
-                c.execute("SELECT COUNT(*) FROM users")
-                users = c.fetchone()[0]
-
-                c.execute("SELECT COUNT(*) FROM banned_users")
-                banned = c.fetchone()[0]
-
-                return {
-                    "files": files,
-                    "batches": batches,
-                    "admins": admins,
-                    "premium": premium,
-                    "users": users,
-                    "banned": banned,
-                    "subscriptions": premium,
+        return {
+            "files": self._count("files"),
+            "batches": self._count("batches"),
+            "admins": self._count("admins"),
+            "premium": len(self.list_premium()),
+            "users": self._count("users"),
+            "banned": self._count("banned_users"),
         }

@@ -527,7 +527,30 @@ async def start(
         ]
     ])
     )
+async def id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
 
+    if not msg or not msg.reply_to_message:
+        await msg.reply_text(
+            "📸 Kisi photo ko reply karke /id bhejo."
+        )
+        return
+
+    replied = msg.reply_to_message
+
+    if replied.photo:
+        photo_id = replied.photo[-1].file_id
+
+        await msg.reply_text(
+            f"🆔 <b>Photo File ID:</b>\n\n"
+            f"<code>{photo_id}</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    await msg.reply_text(
+        "❌ Replied message me photo nahi hai."
+    )
 
 # =========================================================
 # HELP
@@ -2015,6 +2038,7 @@ def main():
     handlers = {
 
         "start": start,
+        "id": id_cmd,
         "help": help_cmd,
 
         "save": save_cmd,

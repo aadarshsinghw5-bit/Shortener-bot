@@ -2,6 +2,7 @@ import os
 import asyncio
 import logging
 import threading
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import quote
 
@@ -22,9 +23,9 @@ from database import Database
 from shortener import Shortener
 
 
-# =========================
+# =========================================================
 # CONFIG
-# =========================
+# =========================================================
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,20 +42,19 @@ BOT_USERNAME = os.environ["BOT_USERNAME"].lstrip("@")
 db = Database()
 
 shortener = Shortener(
-    os.getenv("SHORTENER_API_URL", "https://arolinks.com/api"),
+    os.getenv(
+        "SHORTENER_API_URL",
+        "https://arolinks.com/api",
+    ),
     os.getenv("SHORTENER_API_KEY", ""),
     BOT_USERNAME,
     db,
 )
 
-DELETE_SECONDS = int(
-    os.getenv("DELETE_AFTER_SECONDS", "600")
-)
 
-
-# =========================
+# =========================================================
 # HEALTH SERVER
-# =========================
+# =========================================================
 
 class HealthHandler(BaseHTTPRequestHandler):
 
@@ -62,55 +62,49 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header(
             "Content-Type",
-            "text/plain"
+            "text/plain; charset=utf-8",
         )
         self.end_headers()
-        self.wfile.write(
-            b"Bot is running!"
-        )
+        self.wfile.write(b"Bot is running!")
 
     def log_message(self, *args):
         pass
 
 
-def health_server():
+def start_health_server():
 
     port = int(
-        os.getenv("PORT", "10000")
+        os.environ.get(
+            "PORT",
+            "10000",
+        )
     )
 
     server = HTTPServer(
         ("0.0.0.0", port),
-        HealthHandler
+        HealthHandler,
     )
 
     log.info(
-        "Health server running on %s",
-        port
+        "Health server running on port %s",
+        port,
     )
 
     server.serve_forever()
 
 
-# =========================
+# =========================================================
 # HELPERS
-# =========================
+# =========================================================
 
-def is_owner(uid):
-    return uid == OWNER_ID
+def is_owner(user_id):
+    return user_id == OWNER_ID
 
 
-def is_admin(uid):
+def is_admin(user_id):
     return (
-        uid == OWNER_ID
-        or db.is_admin(uid)
-    )
-
-
-def link(target):
-    return (
-        f"https://t.me/"
-        f"{BOT_USERNAME}?start={target}"
+        user_id == OWNER_ID
+        or db.is_admin(user_id)
     )
 
 
@@ -121,85 +115,211 @@ async def reply(update, text, **kwargs):
     if msg:
         return await msg.reply_text(
             text,
-            **kwargs
+            **kwargs,
         )
 
 
-async def delete_later(
+def bot_link(target):
+    return (
+        f"https://t.me/"
+        f"{BOT_USERNAME}"
+        f"?start={target}"
+    )
+
+
+def minutes_text(seconds):
+
+    if seconds <= 0:
+        return "OFF"
+
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600} hour(s)"
+
+    if seconds % 60 == 0:
+        return f"{seconds // 60} minute(s)"
+
+    return f"{seconds} seconds"
+
+
+# =========================================================
+# AUTO DELETE
+# =========================================================
+
+async def delete_message_later(
     context,
+    delete_id,
     chat_id,
-    ids,
-    seconds
+    message_id,
+    seconds,
 ):
 
-    await asyncio.sleep(seconds)
+    await asyncio.sleep(
+        max(0, seconds)
+    )
 
-    if not isinstance(ids, list):
-        ids = [ids]
+    try:
 
-    for mid in ids:
+        await context.bot.delete_message(
+            chat_id=chat_id,
+            message_id=message_id,
+        )
 
-        try:
-            await context.bot.delete_message(
-                chat_id,
-                mid
-            )
-        except TelegramError:
-            pass
+    except TelegramError:
+        pass
+
+    try:
+        db.mark_delete_done(
+            delete_id
+        )
+    except Exception:
+        log.exception(
+            "Could not mark delete as completed"
+        )
 
 
-# =========================
+def schedule_delete(
+    context,
+    chat_id,
+    message_id,
+    seconds,
+):
+
+    if seconds <= 0:
+        return
+
+    delete_at = (
+        datetime.now(timezone.utc)
+        + timedelta(seconds=seconds)
+    )
+
+    delete_id = db.add_pending_delete(
+        chat_id,
+        message_id,
+        delete_at,
+    )
+
+    asyncio.create_task(
+        delete_message_later(
+            context,
+            delete_id,
+            chat_id,
+            message_id,
+            seconds,
+        )
+    )
+
+
+async def recover_pending_deletes(
+    application,
+):
+
+    try:
+
+        rows = db.get_pending_deletes()
+
+        now = datetime.now(timezone.utc)
+
+        for row in rows:
+
+            try:
+
+                delete_at = datetime.fromisoformat(
+                    row["delete_at"].replace(
+                        "Z",
+                        "+00:00",
+                    )
+                )
+
+                seconds = int(
+                    (
+                        delete_at - now
+                    ).total_seconds()
+                )
+
+                asyncio.create_task(
+                    delete_message_later(
+                        application,
+                        row["id"],
+                        row["chat_id"],
+                        row["message_id"],
+                        max(0, seconds),
+                    )
+                )
+
+            except Exception:
+
+                log.exception(
+                    "Pending delete recovery failed"
+                )
+
+    except Exception:
+
+        log.exception(
+            "Could not recover pending deletes"
+        )
+
+
+# =========================================================
 # FILE DELIVERY
-# =========================
+# =========================================================
 
 async def copy_file(
     context,
     chat_id,
-    row
+    row,
 ):
 
     return await context.bot.copy_message(
         chat_id=chat_id,
         from_chat_id=row["channel_id"],
-        message_id=row["message_id"]
+        message_id=row["message_id"],
     )
 
 
 async def send_file(
     context,
     chat_id,
-    row
+    row,
 ):
 
-    msg = await copy_file(
+    file_message = await copy_file(
         context,
         chat_id,
-        row
+        row,
     )
+
+    seconds = db.get_delete_seconds()
+
+    if seconds <= 0:
+        return
 
     warning = await context.bot.send_message(
-        chat_id,
-        f"⏳ This file will be deleted "
-        f"in {DELETE_SECONDS // 60} minutes."
+        chat_id=chat_id,
+        text=(
+            "⏳ This file will be automatically "
+            f"deleted in {minutes_text(seconds)}."
+        ),
     )
 
-    asyncio.create_task(
-        delete_later(
-            context,
-            chat_id,
-            [
-                msg.message_id,
-                warning.message_id
-            ],
-            DELETE_SECONDS
-        )
+    schedule_delete(
+        context,
+        chat_id,
+        file_message.message_id,
+        seconds,
+    )
+
+    schedule_delete(
+        context,
+        chat_id,
+        warning.message_id,
+        seconds,
     )
 
 
 async def send_batch(
     context,
     chat_id,
-    items
+    items,
 ):
 
     ids = []
@@ -211,7 +331,7 @@ async def send_batch(
             msg = await copy_file(
                 context,
                 chat_id,
-                row
+                row,
             )
 
             ids.append(
@@ -219,43 +339,58 @@ async def send_batch(
             )
 
         except TelegramError:
+
             log.exception(
-                "Batch delivery error"
+                "Batch delivery failed"
             )
 
     if not ids:
 
         await context.bot.send_message(
-            chat_id,
-            "❌ Could not deliver batch."
+            chat_id=chat_id,
+            text="❌ Could not deliver the batch.",
         )
 
         return
 
+    seconds = db.get_delete_seconds()
+
+    if seconds <= 0:
+        return
+
     warning = await context.bot.send_message(
-        chat_id,
-        f"⏳ These {len(ids)} files "
-        f"will be deleted in "
-        f"{DELETE_SECONDS // 60} minutes."
+        chat_id=chat_id,
+        text=(
+            f"⏳ These {len(ids)} files will be "
+            f"automatically deleted in "
+            f"{minutes_text(seconds)}."
+        ),
     )
 
-    asyncio.create_task(
-        delete_later(
+    for message_id in ids:
+
+        schedule_delete(
             context,
             chat_id,
-            ids + [warning.message_id],
-            DELETE_SECONDS
+            message_id,
+            seconds,
         )
+
+    schedule_delete(
+        context,
+        chat_id,
+        warning.message_id,
+        seconds,
     )
 
 
-# =========================
-# FORCE SUB
-# =========================
+# =========================================================
+# FSUB
+# =========================================================
 
 async def check_fsub(
     update,
-    context
+    context,
 ):
 
     channels = db.list_fsub()
@@ -266,95 +401,109 @@ async def check_fsub(
     uid = update.effective_user.id
     missing = []
 
-    for ch in channels:
+    for channel in channels:
 
         try:
 
             member = await context.bot.get_chat_member(
-                chat_id=ch["channel_id"],
-                user_id=uid
+                chat_id=channel["channel_id"],
+                user_id=uid,
             )
 
             if member.status in (
                 "left",
-                "kicked"
+                "kicked",
             ):
-                missing.append(ch)
+                missing.append(channel)
 
         except TelegramError as e:
 
             log.warning(
-                "FSUB check failed: %s",
-                e
+                "FSUB check failed for %s: %s",
+                channel["channel_id"],
+                e,
             )
+
+            # If bot cannot check the channel,
+            # don't block everyone.
+            continue
 
     if not missing:
         return True
 
     buttons = []
 
-    for ch in missing:
+    for channel in missing:
 
         url = (
-            ch["invite_link"]
-            or ch["username"]
+            channel.get("invite_link")
+            or channel.get("username")
         )
 
-        if url:
+        if not url:
+            continue
 
-            buttons.append(
-                [
-                    InlineKeyboardButton(
-                        f"📢 {ch['title']}",
-                        url=url
-                    )
-                ]
-            )
+        # IMPORTANT:
+        # Button shows channel TITLE,
+        # not channel ID.
+        title = (
+            channel.get("title")
+            or "Join Channel"
+        )
+
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    f"📢 {title}",
+                    url=url,
+                )
+            ]
+        )
 
     buttons.append(
         [
             InlineKeyboardButton(
                 "✅ Check Subscription",
-                callback_data="check_fsub"
+                callback_data="check_fsub",
             )
         ]
     )
 
     await reply(
         update,
-        "🔒 Please join the required channel(s), "
-        "then press Check Subscription.",
+        "🔒 Please join the required channel(s) first.",
         reply_markup=InlineKeyboardMarkup(
             buttons
-        )
+        ),
     )
 
     return False
 
 
-# =========================
+# =========================================================
 # START
-# =========================
+# =========================================================
 
 async def start(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    context: ContextTypes.DEFAULT_TYPE,
 ):
 
     user = update.effective_user
+
     uid = user.id
 
     db.add_user(
         uid,
         user.username or "",
-        user.first_name or ""
+        user.first_name or "",
     )
 
     if db.is_banned(uid):
 
         await reply(
             update,
-            "🚫 You are blocked from using this bot."
+            "🚫 You are blocked from using this bot.",
         )
 
         return
@@ -370,14 +519,14 @@ async def start(
         await verify_token(
             update,
             context,
-            arg[7:]
+            arg[7:],
         )
 
         return
 
     if not await check_fsub(
         update,
-        context
+        context,
     ):
         return
 
@@ -386,7 +535,7 @@ async def start(
         await deliver_file(
             update,
             context,
-            arg[5:]
+            arg[5:],
         )
 
         return
@@ -396,7 +545,7 @@ async def start(
         await deliver_batch(
             update,
             context,
-            arg[6:]
+            arg[6:],
         )
 
         return
@@ -404,68 +553,62 @@ async def start(
     await reply(
         update,
         "👋 Welcome!\n\n"
-        "🔗 Send a valid file link to receive a file.\n\n"
-        "📚 Use /help for commands."
+        "Send a valid file link to receive your file.\n\n"
+        "Use /help to see commands.",
     )
 
 
-# =========================
+# =========================================================
 # HELP
-# =========================
+# =========================================================
 
-async def help_cmd(update, context):
+async def help_cmd(
+    update,
+    context,
+):
 
     await reply(
         update,
-        """
-📚 BOT COMMANDS
+        "📚 Commands\n\n"
 
-👤 USER
-/start - Start bot
-/my_plan - Premium status
-/request - Request movie/series
-/cancel - Cancel setup
+        "/start - Start bot\n"
+        "/my_plan - Premium status\n"
+        "/request <name> - Movie/series request\n\n"
 
-🔐 ADMIN
-/auto_del - Auto delete settings
-/fsub_chnl - FSUB channels
-/add_banuser - Ban user
-/del_banuser - Unban user
-/banuser_list - Banned users
-/add_premium - Add premium
-/remove_premium - Remove premium
-/list_premium - Premium users
-/add_fsub - Add force-sub channel
-/del_fsub - Remove force-sub
+        "⚙️ ADMIN\n"
+        "/auto_del - Auto-delete settings\n"
+        "/fsub_chnl - Force-sub channels\n"
+        "/add_banuser <id> - Ban user\n"
+        "/del_banuser <id> - Unban user\n"
+        "/banuser_list - Banned users\n"
+        "/add_premium <id> <days> - Add premium\n"
+        "/remove_premium <id> - Remove premium\n"
+        "/list_premium - Premium users\n"
+        "/add_fsub <id> - Add force-sub channel\n"
+        "/del_fsub <id> - Remove force-sub\n"
+        "/broadcast <text> - Broadcast\n"
+        "/pbroadcast <text> - Broadcast + pin\n"
+        "/batch <file_id> ... - Create batch\n"
+        "/genlink <file_id> - Generate bot link\n\n"
 
-👑 OWNER
-/add_admins - Add admin
-/del_admins - Remove admin
-/admin_list - Admin list
-/users - Total users
+        "👑 OWNER\n"
+        "/add_admins <id>\n"
+        "/del_admins <id>\n"
+        "/admin_list\n"
+        "/users\n\n"
 
-📢 BROADCAST
-/broadcast - Broadcast
-/pbroadcast - Broadcast + pin
-
-📁 FILES
-/save - Save replied file
-/get - Get file
-/genlink - Generate link
-/batch - Create batch
-
-Legacy commands:
- /verify /addsub /remsub /addadmin
- /removeadmin /admins /stats
-"""
+        "/cancel - Reset setup",
     )
 
 
-# =========================
+# =========================================================
 # SAVE
-# =========================
+# =========================================================
 
-async def save_cmd(update, context):
+async def save_cmd(
+    update,
+    context,
+):
 
     if not is_admin(
         update.effective_user.id
@@ -478,7 +621,7 @@ async def save_cmd(update, context):
 
         await reply(
             update,
-            "Reply to a file/post with /save."
+            "Reply to a file/post with /save.",
         )
 
         return
@@ -488,24 +631,24 @@ async def save_cmd(update, context):
         copied = await context.bot.copy_message(
             chat_id=DB_CHANNEL_ID,
             from_chat_id=msg.chat_id,
-            message_id=msg.message_id
+            message_id=msg.message_id,
         )
 
-        fid = db.add_file(
+        file_id = db.add_file(
             DB_CHANNEL_ID,
             copied.message_id,
-            msg.caption or ""
+            msg.caption or "",
         )
 
-        bot_url = link(
-            "file_" + fid
+        link = bot_link(
+            f"file_{file_id}"
         )
 
         share_url = (
             "https://telegram.me/share/url?url="
             + quote(
-                bot_url,
-                safe=""
+                link,
+                safe="",
             )
         )
 
@@ -514,7 +657,7 @@ async def save_cmd(update, context):
                 [
                     InlineKeyboardButton(
                         "📤 Share Link",
-                        url=share_url
+                        url=share_url,
                     )
                 ]
             ]
@@ -525,21 +668,20 @@ async def save_cmd(update, context):
             await context.bot.edit_message_reply_markup(
                 chat_id=DB_CHANNEL_ID,
                 message_id=copied.message_id,
-                reply_markup=keyboard
+                reply_markup=keyboard,
             )
 
-        except TelegramError as e:
+        except TelegramError:
 
-            log.warning(
-                "Share button error: %s",
-                e
+            log.exception(
+                "Could not add share button"
             )
 
         await reply(
             update,
-            f"✅ File saved!\n\n"
-            f"🆔 ID: {fid}\n\n"
-            f"🤖 Bot Link:\n{bot_url}"
+            "✅ File saved successfully!\n\n"
+            f"🆔 File ID: {file_id}\n\n"
+            f"🤖 Bot Link:\n{link}",
         )
 
     except Exception as e:
@@ -550,15 +692,18 @@ async def save_cmd(update, context):
 
         await reply(
             update,
-            f"❌ Save error:\n{e}"
+            f"❌ Could not save file:\n{e}",
         )
 
 
-# =========================
+# =========================================================
 # GENLINK
-# =========================
+# =========================================================
 
-async def genlink_cmd(update, context):
+async def genlink_cmd(
+    update,
+    context,
+):
 
     if not is_admin(
         update.effective_user.id
@@ -569,7 +714,7 @@ async def genlink_cmd(update, context):
 
         await reply(
             update,
-            "Usage: /genlink <file_id>"
+            "Usage: /genlink <file_id>",
         )
 
         return
@@ -580,28 +725,34 @@ async def genlink_cmd(update, context):
 
         await reply(
             update,
-            "❌ File not found."
+            "❌ File not found.",
         )
 
         return
 
     await reply(
         update,
-        f"🔗 Bot Link:\n{link('file_' + fid)}"
+        "🔗 Bot Link:\n"
+        + bot_link(
+            f"file_{fid}"
+        ),
     )
 
 
-# =========================
+# =========================================================
 # GET
-# =========================
+# =========================================================
 
-async def get_cmd(update, context):
+async def get_cmd(
+    update,
+    context,
+):
 
     if len(context.args) != 1:
 
         await reply(
             update,
-            "Usage: /get <file_id>"
+            "Usage: /get <file_id>",
         )
 
         return
@@ -609,29 +760,35 @@ async def get_cmd(update, context):
     await deliver_file(
         update,
         context,
-        context.args[0]
+        context.args[0],
     )
 
+
+# =========================================================
+# DELIVER FILE
+# =========================================================
 
 async def deliver_file(
     update,
     context,
-    fid
+    file_id,
 ):
 
     if not await check_fsub(
         update,
-        context
+        context,
     ):
         return
 
-    row = db.get_file(fid)
+    row = db.get_file(
+        file_id
+    )
 
     if not row:
 
         await reply(
             update,
-            "❌ File not found."
+            "❌ File not found.",
         )
 
         return
@@ -643,21 +800,21 @@ async def deliver_file(
         await send_file(
             context,
             update.effective_chat.id,
-            row
+            row,
         )
 
         return
 
     short_url = shortener.create(
-        fid,
-        uid
+        file_id,
+        uid,
     )
 
     if not short_url:
 
         await reply(
             update,
-            "⚠️ Shortener is not configured correctly."
+            "⚠️ Shortener is not configured correctly.",
         )
 
         return
@@ -666,25 +823,28 @@ async def deliver_file(
         update,
         "🔐 Continue to unlock this file.\n\n"
         "Complete the shortener and "
-        "you will be brought back to the bot.",
+        "you will be returned to the bot.",
         reply_markup=InlineKeyboardMarkup(
             [
                 [
                     InlineKeyboardButton(
                         "🔗 Continue",
-                        url=short_url
+                        url=short_url,
                     )
                 ]
             ]
-        )
+        ),
     )
 
 
-# =========================
+# =========================================================
 # BATCH
-# =========================
+# =========================================================
 
-async def batch_cmd(update, context):
+async def batch_cmd(
+    update,
+    context,
+):
 
     if not is_admin(
         update.effective_user.id
@@ -695,56 +855,60 @@ async def batch_cmd(update, context):
 
         await reply(
             update,
-            "Usage: /batch <file_id> <file_id> ..."
+            "Usage: /batch <file_id> <file_id> ...",
         )
 
         return
 
     valid = [
-        x for x in context.args
-        if db.get_file(x)
+        fid
+        for fid in context.args
+        if db.get_file(fid)
     ]
 
     if not valid:
 
         await reply(
             update,
-            "❌ No valid files."
+            "❌ No valid file IDs.",
         )
 
         return
 
-    bid = db.create_batch(valid)
+    bid = db.create_batch(
+        valid
+    )
 
     await reply(
         update,
-        f"📦 Batch created!\n\n"
-        f"📁 Files: {len(valid)}\n"
-        f"🆔 Batch: {bid}\n\n"
+        f"📦 Batch created: {len(valid)} files\n\n"
+        f"🆔 {bid}\n\n"
         f"🤖 Bot Link:\n"
-        f"{link('batch_' + bid)}"
+        f"{bot_link('batch_' + bid)}",
     )
 
 
 async def deliver_batch(
     update,
     context,
-    bid
+    batch_id,
 ):
 
     if not await check_fsub(
         update,
-        context
+        context,
     ):
         return
 
-    items = db.get_batch_items(bid)
+    items = db.get_batch_items(
+        batch_id
+    )
 
     if not items:
 
         await reply(
             update,
-            "❌ Batch not found."
+            "❌ Batch not found or empty.",
         )
 
         return
@@ -756,53 +920,56 @@ async def deliver_batch(
         await send_batch(
             context,
             update.effective_chat.id,
-            items
+            items,
         )
 
         return
 
     short_url = shortener.create(
-        "batch:" + bid,
-        uid
+        f"batch:{batch_id}",
+        uid,
     )
 
     if not short_url:
 
         await reply(
             update,
-            "⚠️ Shortener error."
+            "⚠️ Shortener is not configured correctly.",
         )
 
         return
 
     await reply(
         update,
-        f"📦 Batch contains {len(items)} files.\n\n"
-        "Complete the shortener to unlock.",
+        f"📦 This batch contains {len(items)} files.\n\n"
+        "Complete the shortener to unlock the batch.",
         reply_markup=InlineKeyboardMarkup(
             [
                 [
                     InlineKeyboardButton(
                         "🔗 Continue",
-                        url=short_url
+                        url=short_url,
                     )
                 ]
             ]
-        )
+        ),
     )
 
 
-# =========================
+# =========================================================
 # VERIFY
-# =========================
+# =========================================================
 
-async def verify_cmd(update, context):
+async def verify_cmd(
+    update,
+    context,
+):
 
     if len(context.args) != 1:
 
         await reply(
             update,
-            "Usage: /verify <token>"
+            "Usage: /verify <token>",
         )
 
         return
@@ -810,29 +977,34 @@ async def verify_cmd(update, context):
     await verify_token(
         update,
         context,
-        context.args[0]
+        context.args[0],
     )
 
 
 async def verify_token(
     update,
     context,
-    token
+    token,
 ):
 
-    payload = shortener.verify(token)
+    payload = shortener.verify(
+        token
+    )
 
     if not payload:
 
         await reply(
             update,
-            "❌ Invalid, expired, or used link."
+            "❌ Invalid, expired, or already-used token.",
         )
 
         return
 
     token_uid, target = payload
-    current_uid = update.effective_user.id
+
+    current_uid = (
+        update.effective_user.id
+    )
 
     if (
         token_uid != 0
@@ -841,9 +1013,15 @@ async def verify_token(
 
         await reply(
             update,
-            "❌ This link belongs to another user."
+            "❌ This verification link belongs to another user.",
         )
 
+        return
+
+    if not await check_fsub(
+        update,
+        context,
+    ):
         return
 
     if target.startswith("batch:"):
@@ -856,7 +1034,7 @@ async def verify_token(
 
             await reply(
                 update,
-                "❌ Batch not found."
+                "❌ Batch not found or empty.",
             )
 
             return
@@ -864,18 +1042,20 @@ async def verify_token(
         await send_batch(
             context,
             update.effective_chat.id,
-            items
+            items,
         )
 
         return
 
-    row = db.get_file(target)
+    row = db.get_file(
+        target
+    )
 
     if not row:
 
         await reply(
             update,
-            "❌ File not found."
+            "❌ File not found.",
         )
 
         return
@@ -883,38 +1063,47 @@ async def verify_token(
     await send_file(
         context,
         update.effective_chat.id,
-        row
+        row,
     )
 
 
-# =========================
+# =========================================================
 # PREMIUM
-# =========================
+# =========================================================
 
-async def my_plan_cmd(update, context):
+async def my_plan_cmd(
+    update,
+    context,
+):
 
     uid = update.effective_user.id
-    plan = db.get_premium(uid)
+
+    plan = db.get_premium(
+        uid
+    )
 
     if not plan:
 
         await reply(
             update,
             "📋 Plan: Free\n\n"
-            "No active premium membership."
+            "No active premium membership.",
         )
 
         return
 
     await reply(
         update,
-        f"💎 Premium Active\n\n"
+        "💎 Plan: Premium\n\n"
         f"👤 User ID: {uid}\n"
-        f"⏳ Expires: {plan['expires_at']}"
+        f"⏳ Expires: {plan['expires_at']}",
     )
 
 
-async def add_premium_cmd(update, context):
+async def add_premium_cmd(
+    update,
+    context,
+):
 
     if not is_admin(
         update.effective_user.id
@@ -925,34 +1114,44 @@ async def add_premium_cmd(update, context):
 
         await reply(
             update,
-            "Usage: /add_premium <user_id> <days>"
+            "Usage: /add_premium <user_id> <days>",
         )
 
         return
 
     try:
 
-        uid = int(context.args[0])
-        days = int(context.args[1])
+        uid = int(
+            context.args[0]
+        )
 
-        db.add_premium(uid, days)
+        days = int(
+            context.args[1]
+        )
+
+        db.add_premium(
+            uid,
+            days,
+        )
 
         await reply(
             update,
-            f"💎 Premium added.\n"
-            f"👤 {uid}\n"
-            f"📅 {days} days"
+            f"💎 Premium added for {uid} "
+            f"for {days} days.",
         )
 
     except ValueError:
 
         await reply(
             update,
-            "❌ Invalid numbers."
+            "❌ User ID and days must be numbers.",
         )
 
 
-async def remove_premium_cmd(update, context):
+async def remove_premium_cmd(
+    update,
+    context,
+):
 
     if not is_admin(
         update.effective_user.id
@@ -960,32 +1159,41 @@ async def remove_premium_cmd(update, context):
         return
 
     if len(context.args) != 1:
+
         await reply(
             update,
-            "Usage: /remove_premium <user_id>"
+            "Usage: /remove_premium <user_id>",
         )
+
         return
 
     try:
 
+        uid = int(
+            context.args[0]
+        )
+
         db.remove_premium(
-            int(context.args[0])
+            uid
         )
 
         await reply(
             update,
-            "✅ Premium removed."
+            "✅ Premium removed.",
         )
 
     except ValueError:
 
         await reply(
             update,
-            "❌ Invalid user ID."
+            "❌ User ID must be a number.",
         )
 
 
-async def list_premium_cmd(update, context):
+async def list_premium_cmd(
+    update,
+    context,
+):
 
     if not is_admin(
         update.effective_user.id
@@ -998,12 +1206,12 @@ async def list_premium_cmd(update, context):
 
         await reply(
             update,
-            "💎 No active premium users."
+            "💎 No active premium accounts.",
         )
 
         return
 
-    text = "💎 PREMIUM USERS\n\n"
+    text = "💎 Active Premium:\n\n"
 
     text += "\n".join(
         f"• {r['user_id']} — {r['expires_at']}"
@@ -1012,15 +1220,18 @@ async def list_premium_cmd(update, context):
 
     await reply(
         update,
-        text
+        text,
     )
 
 
-# =========================
-# FSUB
-# =========================
+# =========================================================
+# AUTO DELETE COMMAND
+# =========================================================
 
-async def add_fsub_cmd(update, context):
+async def auto_del_cmd(
+    update,
+    context,
+):
 
     if not is_admin(
         update.effective_user.id
@@ -1029,91 +1240,128 @@ async def add_fsub_cmd(update, context):
 
     if not context.args:
 
+        seconds = db.get_delete_seconds()
+
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "5 Minutes",
+                        callback_data="del_300",
+                    ),
+                    InlineKeyboardButton(
+                        "10 Minutes",
+                        callback_data="del_600",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "15 Minutes",
+                        callback_data="del_900",
+                    ),
+                    InlineKeyboardButton(
+                        "30 Minutes",
+                        callback_data="del_1800",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "1 Hour",
+                        callback_data="del_3600",
+                    ),
+                    InlineKeyboardButton(
+                        "OFF",
+                        callback_data="del_0",
+                    ),
+                ],
+            ]
+        )
+
         await reply(
             update,
-            "Usage:\n"
-            "/add_fsub <channel_id> [invite_link]"
+            "⚙️ Auto Delete Settings\n\n"
+            f"Current: {minutes_text(seconds)}\n\n"
+            "Choose a new timer:",
+            reply_markup=keyboard,
         )
 
         return
 
-    channel_id = context.args[0]
-    invite = (
-        context.args[1]
-        if len(context.args) > 1
-        else ""
+    try:
+
+        seconds = int(
+            context.args[0]
+        )
+
+        if seconds < 0:
+            raise ValueError
+
+        db.set_setting(
+            "delete_seconds",
+            seconds,
+        )
+
+        await reply(
+            update,
+            "✅ Auto-delete saved.\n\n"
+            f"New setting: {minutes_text(seconds)}",
+        )
+
+    except ValueError:
+
+        await reply(
+            update,
+            "❌ Use seconds.\n\n"
+            "Example:\n"
+            "/auto_del 600\n"
+            "/auto_del 300\n"
+            "/auto_del 0",
+        )
+
+
+async def auto_delete_callback(
+    update,
+    context,
+):
+
+    query = update.callback_query
+
+    await query.answer()
+
+    if not is_admin(
+        query.from_user.id
+    ):
+        return
+
+    seconds = int(
+        query.data.split("_")[1]
+    )
+
+    db.set_setting(
+        "delete_seconds",
+        seconds,
     )
 
     try:
 
-        chat = await context.bot.get_chat(
-            channel_id
+        await query.edit_message_text(
+            "⚙️ Auto Delete Settings\n\n"
+            "✅ Setting saved!\n\n"
+            f"Current: {minutes_text(seconds)}",
         )
 
-        title = chat.title or str(channel_id)
-
-        # Public username
-        username = (
-            f"https://t.me/{chat.username}"
-            if chat.username
-            else ""
-        )
-
-        db.add_fsub(
-            channel_id,
-            invite or username,
-            title
-        )
-
-        await reply(
-            update,
-            f"✅ FSUB added!\n\n"
-            f"📢 Channel: {title}\n"
-            f"🆔 ID: {channel_id}\n\n"
-            f"Bot will show the channel NAME in the button."
-        )
-
-    except TelegramError as e:
-
-        await reply(
-            update,
-            "❌ Bot cannot access this channel.\n\n"
-            "Make sure the bot is an admin there."
-        )
-
-        log.warning(
-            "FSUB add error: %s",
-            e
-        )
+    except TelegramError:
+        pass
 
 
-async def del_fsub_cmd(update, context):
+# =========================================================
+# FSUB COMMANDS
+# =========================================================
 
-    if not is_admin(
-        update.effective_user.id
-    ):
-        return
-
-    if len(context.args) != 1:
-
-        await reply(
-            update,
-            "Usage: /del_fsub <channel_id>"
-        )
-
-        return
-
-    db.del_fsub(
-        context.args[0]
-    )
-
-    await reply(
-        update,
-        "✅ FSUB channel removed."
-    )
-
-
-async def fsub_chnl_cmd(update, context):
+async def fsub_chnl_cmd(
+    update,
+    context,
+):
 
     if not is_admin(
         update.effective_user.id
@@ -1126,27 +1374,131 @@ async def fsub_chnl_cmd(update, context):
 
         await reply(
             update,
-            "📢 No FSUB channels."
+            "📢 No force-sub channels configured.",
         )
 
         return
 
-    text = "📢 FORCE SUB CHANNELS\n\n"
+    text = "📢 Force-sub channels:\n\n"
 
-    for ch in channels:
+    for channel in channels:
+
+        title = (
+            channel.get("title")
+            or "Unnamed Channel"
+        )
 
         text += (
-            f"• {ch['title']}\n"
-            f"  ID: {ch['channel_id']}\n\n"
+            f"• {title}\n"
+            f"  ID: {channel['channel_id']}\n\n"
         )
 
     await reply(
         update,
-        text
+        text,
     )
 
 
-async def fsub_callback(update, context):
+async def add_fsub_cmd(
+    update,
+    context,
+):
+
+    if not is_admin(
+        update.effective_user.id
+    ):
+        return
+
+    if len(context.args) < 1:
+
+        await reply(
+            update,
+            "Usage:\n"
+            "/add_fsub <channel_id>\n\n"
+            "Bot must be admin in the channel.",
+        )
+
+        return
+
+    channel_id = context.args[0]
+
+    try:
+
+        chat = await context.bot.get_chat(
+            channel_id
+        )
+
+        title = (
+            chat.title
+            or chat.first_name
+            or "Channel"
+        )
+
+        username = chat.username
+
+        invite_link = (
+            f"https://t.me/{username}"
+            if username
+            else ""
+        )
+
+        db.add_fsub(
+            channel_id,
+            invite_link,
+            title,
+        )
+
+        await reply(
+            update,
+            "✅ Force-sub channel added.\n\n"
+            f"📢 Name: {title}\n"
+            f"🆔 ID: {channel_id}\n\n"
+            "The button will show the channel name.",
+        )
+
+    except TelegramError as e:
+
+        await reply(
+            update,
+            "❌ Could not access this channel.\n\n"
+            "Make sure the bot is an admin there.\n\n"
+            f"Error: {e}",
+        )
+
+
+async def del_fsub_cmd(
+    update,
+    context,
+):
+
+    if not is_admin(
+        update.effective_user.id
+    ):
+        return
+
+    if len(context.args) != 1:
+
+        await reply(
+            update,
+            "Usage: /del_fsub <channel_id>",
+        )
+
+        return
+
+    db.del_fsub(
+        context.args[0]
+    )
+
+    await reply(
+        update,
+        "✅ Force-sub channel removed.",
+    )
+
+
+async def fsub_callback(
+    update,
+    context,
+):
 
     query = update.callback_query
 
@@ -1159,19 +1511,24 @@ async def fsub_callback(update, context):
 
     if await check_fsub(
         update,
-        context
+        context,
     ):
-        await query.message.chat.send_message(
-            "✅ Subscription verified!\n\n"
-            "Now open your file link again."
+
+        await context.bot.send_message(
+            query.message.chat_id,
+            "✅ Subscription verified.\n\n"
+            "Now open your file link again.",
         )
 
 
-# =========================
+# =========================================================
 # BAN
-# =========================
+# =========================================================
 
-async def add_banuser_cmd(update, context):
+async def add_banuser_cmd(
+    update,
+    context,
+):
 
     if not is_admin(
         update.effective_user.id
@@ -1182,34 +1539,39 @@ async def add_banuser_cmd(update, context):
 
         await reply(
             update,
-            "Usage: /add_banuser <user_id>"
+            "Usage: /add_banuser <user_id>",
         )
 
         return
 
     try:
 
-        uid = int(context.args[0])
+        uid = int(
+            context.args[0]
+        )
 
         db.ban_user(
             uid,
-            update.effective_user.id
+            update.effective_user.id,
         )
 
         await reply(
             update,
-            f"🚫 User {uid} banned."
+            f"🚫 User {uid} banned.",
         )
 
     except ValueError:
 
         await reply(
             update,
-            "❌ Invalid user ID."
+            "❌ Invalid user ID.",
         )
 
 
-async def del_banuser_cmd(update, context):
+async def del_banuser_cmd(
+    update,
+    context,
+):
 
     if not is_admin(
         update.effective_user.id
@@ -1220,7 +1582,7 @@ async def del_banuser_cmd(update, context):
 
         await reply(
             update,
-            "Usage: /del_banuser <user_id>"
+            "Usage: /del_banuser <user_id>",
         )
 
         return
@@ -1233,18 +1595,21 @@ async def del_banuser_cmd(update, context):
 
         await reply(
             update,
-            "✅ User unbanned."
+            "✅ User unbanned.",
         )
 
     except ValueError:
 
         await reply(
             update,
-            "❌ Invalid user ID."
+            "❌ Invalid user ID.",
         )
 
 
-async def banuser_list_cmd(update, context):
+async def banuser_list_cmd(
+    update,
+    context,
+):
 
     if not is_admin(
         update.effective_user.id
@@ -1257,26 +1622,74 @@ async def banuser_list_cmd(update, context):
 
         await reply(
             update,
-            "🚫 No banned users."
+            "🚫 No banned users.",
         )
 
         return
 
     await reply(
         update,
-        "🚫 BANNED USERS\n\n" +
-        "\n".join(
+        "🚫 Banned users:\n\n"
+        + "\n".join(
             f"• {r['user_id']}"
             for r in rows
-        )
+        ),
     )
 
 
-# =========================
-# ADMIN
-# =========================
+# =========================================================
+# REQUEST
+# =========================================================
 
-async def add_admins_cmd(update, context):
+async def request_cmd(
+    update,
+    context,
+):
+
+    text = " ".join(
+        context.args
+    ).strip()
+
+    if not text:
+
+        await reply(
+            update,
+            "Usage: /request <movie or series>",
+        )
+
+        return
+
+    rid = db.add_request(
+        update.effective_user.id,
+        text,
+    )
+
+    await reply(
+        update,
+        f"✅ Request submitted.\n🆔 Request ID: {rid}",
+    )
+
+    try:
+
+        await context.bot.send_message(
+            OWNER_ID,
+            f"📩 New request #{rid}\n\n"
+            f"👤 User: {update.effective_user.id}\n"
+            f"🎬 Request: {text}",
+        )
+
+    except TelegramError:
+        pass
+
+
+# =========================================================
+# ADMIN MANAGEMENT
+# =========================================================
+
+async def add_admins_cmd(
+    update,
+    context,
+):
 
     if not is_owner(
         update.effective_user.id
@@ -1284,10 +1697,12 @@ async def add_admins_cmd(update, context):
         return
 
     if len(context.args) != 1:
+
         await reply(
             update,
-            "Usage: /add_admins <user_id>"
+            "Usage: /add_admins <user_id>",
         )
+
         return
 
     try:
@@ -1298,18 +1713,21 @@ async def add_admins_cmd(update, context):
 
         await reply(
             update,
-            "✅ Admin added."
+            "✅ Admin added.",
         )
 
     except ValueError:
 
         await reply(
             update,
-            "❌ Invalid user ID."
+            "❌ Invalid user ID.",
         )
 
 
-async def del_admins_cmd(update, context):
+async def del_admins_cmd(
+    update,
+    context,
+):
 
     if not is_owner(
         update.effective_user.id
@@ -1317,10 +1735,12 @@ async def del_admins_cmd(update, context):
         return
 
     if len(context.args) != 1:
+
         await reply(
             update,
-            "Usage: /del_admins <user_id>"
+            "Usage: /del_admins <user_id>",
         )
+
         return
 
     try:
@@ -1331,18 +1751,21 @@ async def del_admins_cmd(update, context):
 
         await reply(
             update,
-            "✅ Admin removed."
+            "✅ Admin removed.",
         )
 
     except ValueError:
 
         await reply(
             update,
-            "❌ Invalid user ID."
+            "❌ Invalid user ID.",
         )
 
 
-async def admin_list_cmd(update, context):
+async def admin_list_cmd(
+    update,
+    context,
+):
 
     if not is_owner(
         update.effective_user.id
@@ -1368,15 +1791,18 @@ async def admin_list_cmd(update, context):
 
     await reply(
         update,
-        text
+        text,
     )
 
 
-# =========================
+# =========================================================
 # BROADCAST
-# =========================
+# =========================================================
 
-async def broadcast_cmd(update, context):
+async def broadcast_cmd(
+    update,
+    context,
+):
 
     if not is_admin(
         update.effective_user.id
@@ -1391,20 +1817,23 @@ async def broadcast_cmd(update, context):
 
         await reply(
             update,
-            "Usage: /broadcast <message>"
+            "Usage: /broadcast <message>",
         )
 
         return
 
-    ok = fail = 0
+    users = db.list_users()
 
-    for uid in db.list_users():
+    ok = 0
+    fail = 0
+
+    for uid in users:
 
         try:
 
             await context.bot.send_message(
                 uid,
-                text
+                text,
             )
 
             ok += 1
@@ -1413,17 +1842,22 @@ async def broadcast_cmd(update, context):
 
             fail += 1
 
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(
+            0.05
+        )
 
     await reply(
         update,
         f"📣 Broadcast complete.\n\n"
         f"✅ Sent: {ok}\n"
-        f"❌ Failed: {fail}"
+        f"❌ Failed: {fail}",
     )
 
 
-async def pbroadcast_cmd(update, context):
+async def pbroadcast_cmd(
+    update,
+    context,
+):
 
     if not is_admin(
         update.effective_user.id
@@ -1438,20 +1872,23 @@ async def pbroadcast_cmd(update, context):
 
         await reply(
             update,
-            "Usage: /pbroadcast <message>"
+            "Usage: /pbroadcast <message>",
         )
 
         return
 
-    ok = fail = 0
+    users = db.list_users()
 
-    for uid in db.list_users():
+    ok = 0
+    fail = 0
+
+    for uid in users:
 
         try:
 
             msg = await context.bot.send_message(
                 uid,
-                text
+                text,
             )
 
             try:
@@ -1459,7 +1896,7 @@ async def pbroadcast_cmd(update, context):
                 await context.bot.pin_chat_message(
                     uid,
                     msg.message_id,
-                    disable_notification=True
+                    disable_notification=True,
                 )
 
             except TelegramError:
@@ -1471,126 +1908,26 @@ async def pbroadcast_cmd(update, context):
 
             fail += 1
 
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(
+            0.05
+        )
 
     await reply(
         update,
         f"📌 Broadcast complete.\n\n"
         f"✅ Sent: {ok}\n"
-        f"❌ Failed: {fail}"
+        f"❌ Failed: {fail}",
     )
 
 
-# =========================
-# REQUEST
-# =========================
+# =========================================================
+# USERS
+# =========================================================
 
-async def request_cmd(update, context):
-
-    text = " ".join(
-        context.args
-    ).strip()
-
-    if not text:
-
-        await reply(
-            update,
-            "Usage: /request <movie or series>"
-        )
-
-        return
-
-    rid = db.add_request(
-        update.effective_user.id,
-        text
-    )
-
-    await reply(
-        update,
-        f"✅ Request submitted!\n"
-        f"🆔 Request ID: {rid}"
-    )
-
-    try:
-
-        await context.bot.send_message(
-            OWNER_ID,
-            f"📩 NEW REQUEST\n\n"
-            f"🆔 {rid}\n"
-            f"👤 {update.effective_user.id}\n"
-            f"🎬 {text}"
-        )
-
-    except TelegramError:
-        pass
-
-
-# =========================
-# SETTINGS
-# =========================
-
-async def auto_del_cmd(update, context):
-
-    if not is_admin(
-        update.effective_user.id
-    ):
-        return
-
-    if not context.args:
-
-        current = db.get_setting(
-            "delete_seconds",
-            str(DELETE_SECONDS)
-        )
-
-        await reply(
-            update,
-            f"⏳ Current: {current} seconds\n\n"
-            f"Usage: /auto_del <seconds>"
-        )
-
-        return
-
-    try:
-
-        seconds = max(
-            30,
-            int(context.args[0])
-        )
-
-        db.set_setting(
-            "delete_seconds",
-            str(seconds)
-        )
-
-        await reply(
-            update,
-            f"✅ Auto-delete saved: {seconds} seconds."
-        )
-
-    except ValueError:
-
-        await reply(
-            update,
-            "❌ Seconds must be a number."
-        )
-
-
-async def cancel_cmd(update, context):
-
-    context.user_data.clear()
-
-    await reply(
-        update,
-        "✅ Setup cancelled."
-    )
-
-
-# =========================
-# USERS / STATS
-# =========================
-
-async def users_cmd(update, context):
+async def users_cmd(
+    update,
+    context,
+):
 
     if not is_owner(
         update.effective_user.id
@@ -1599,11 +1936,90 @@ async def users_cmd(update, context):
 
     await reply(
         update,
-        f"👥 Total users: {db.user_count()}"
+        f"👥 Total users: {db.user_count()}",
     )
 
 
-async def stats_cmd(update, context):
+# =========================================================
+# CANCEL
+# =========================================================
+
+async def cancel_cmd(
+    update,
+    context,
+):
+
+    context.user_data.clear()
+
+    await reply(
+        update,
+        "✅ All active setup/configuration state has been reset.",
+    )
+
+
+# =========================================================
+# LEGACY COMMANDS
+# =========================================================
+
+async def addsub_cmd(
+    update,
+    context,
+):
+
+    await add_premium_cmd(
+        update,
+        context,
+    )
+
+
+async def remsub_cmd(
+    update,
+    context,
+):
+
+    await remove_premium_cmd(
+        update,
+        context,
+    )
+
+
+async def addadmin_cmd(
+    update,
+    context,
+):
+
+    await add_admins_cmd(
+        update,
+        context,
+    )
+
+
+async def removeadmin_cmd(
+    update,
+    context,
+):
+
+    await del_admins_cmd(
+        update,
+        context,
+    )
+
+
+async def admins_cmd(
+    update,
+    context,
+):
+
+    await admin_list_cmd(
+        update,
+        context,
+    )
+
+
+async def stats_cmd(
+    update,
+    context,
+):
 
     if not is_admin(
         update.effective_user.id
@@ -1614,85 +2030,95 @@ async def stats_cmd(update, context):
 
     await reply(
         update,
-        f"📊 STATISTICS\n\n"
+        f"📊 Statistics\n\n"
         f"📁 Files: {s['files']}\n"
         f"📦 Batches: {s['batches']}\n"
         f"👑 Admins: {s['admins']}\n"
         f"💎 Premium: {s['premium']}\n"
         f"👥 Users: {s['users']}\n"
-        f"🚫 Banned: {s['banned']}"
+        f"🚫 Banned: {s['banned']}",
     )
 
 
-# =========================
-# LEGACY COMMANDS
-# =========================
+# =========================================================
+# STARTUP
+# =========================================================
 
-async def addsub_cmd(update, context):
-    await add_premium_cmd(update, context)
+async def post_init(
+    application,
+):
 
+    log.info(
+        "Recovering pending auto-deletes..."
+    )
 
-async def remsub_cmd(update, context):
-    await remove_premium_cmd(update, context)
+    await recover_pending_deletes(
+        application
+    )
 
-
-async def addadmin_cmd(update, context):
-    await add_admins_cmd(update, context)
-
-
-async def removeadmin_cmd(update, context):
-    await del_admins_cmd(update, context)
-
-
-async def admins_cmd(update, context):
-    await admin_list_cmd(update, context)
+    log.info(
+        "Pending auto-delete recovery complete."
+    )
 
 
-# =========================
+# =========================================================
 # MAIN
-# =========================
+# =========================================================
 
 def main():
 
     threading.Thread(
-        target=health_server,
-        daemon=True
+        target=start_health_server,
+        daemon=True,
     ).start()
 
     app = (
         Application
         .builder()
         .token(BOT_TOKEN)
+        .post_init(post_init)
         .build()
     )
 
     commands = {
+
         "start": start,
         "help": help_cmd,
+
         "save": save_cmd,
         "get": get_cmd,
         "verify": verify_cmd,
+
         "batch": batch_cmd,
         "genlink": genlink_cmd,
+
         "my_plan": my_plan_cmd,
         "request": request_cmd,
+
         "auto_del": auto_del_cmd,
         "fsub_chnl": fsub_chnl_cmd,
+
         "add_banuser": add_banuser_cmd,
         "del_banuser": del_banuser_cmd,
         "banuser_list": banuser_list_cmd,
+
         "add_premium": add_premium_cmd,
         "remove_premium": remove_premium_cmd,
         "list_premium": list_premium_cmd,
+
         "add_fsub": add_fsub_cmd,
         "del_fsub": del_fsub_cmd,
+
         "add_admins": add_admins_cmd,
         "del_admins": del_admins_cmd,
         "admin_list": admin_list_cmd,
+
         "broadcast": broadcast_cmd,
         "pbroadcast": pbroadcast_cmd,
+
         "cancel": cancel_cmd,
         "users": users_cmd,
+
         "addsub": addsub_cmd,
         "remsub": remsub_cmd,
         "addadmin": addadmin_cmd,
@@ -1701,19 +2127,26 @@ def main():
         "stats": stats_cmd,
     }
 
-    for name, func in commands.items():
+    for name, function in commands.items():
 
         app.add_handler(
             CommandHandler(
                 name,
-                func
+                function,
             )
         )
 
     app.add_handler(
         CallbackQueryHandler(
             fsub_callback,
-            pattern="^check_fsub$"
+            pattern="^check_fsub$",
+        )
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(
+            auto_delete_callback,
+            pattern="^del_[0-9]+$",
         )
     )
 

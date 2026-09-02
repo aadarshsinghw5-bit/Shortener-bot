@@ -500,7 +500,7 @@ async def start(
         return
 
     await update.message.reply_photo(
-    photo="e42c90c0dfb1",
+    photo="AgACAgUAAxkBAAIBkWqYP_VRJgqeZpyT34b4A5jrKswGAAIaE2sbavbBVBSDBmaBt3B9AQADAgADeAADPQQ",
     caption=(
         f"⚡ <b>HEY, {update.effective_user.first_name} ~</b>\n\n"
         "I AM FILE STORE BOT, I CAN STORE PRIVATE "

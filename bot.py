@@ -38,9 +38,7 @@ OWNER_ID = int(os.environ["OWNER_ID"])
 DB_CHANNEL_ID = int(os.environ["DB_CHANNEL_ID"])
 BOT_USERNAME = os.environ["BOT_USERNAME"].lstrip("@")
 
-db = Database(
-    os.getenv("DATABASE_PATH", "bot.db")
-)
+db = Database()
 
 shortener = Shortener(
     os.getenv(

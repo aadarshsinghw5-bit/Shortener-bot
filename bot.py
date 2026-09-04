@@ -1,2814 +1,788 @@
+import os
 import asyncio
 import logging
-import os
-import re
-import uuid
-from datetime import datetime, timezone
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import quote
 
-from aiogram import Bot, Dispatcher, F, Router
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
-from aiogram.filters import Command, CommandStart
-from aiogram.types import (
-    Message,
-    CallbackQuery,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    LinkPreviewOptions,
-)
-
-from fastapi import FastAPI
-import uvicorn
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.error import TelegramError
 
 from database import Database
-
-
-# =========================================================
-# LOGGING
-# =========================================================
+from shortener import Shortener
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s"
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
-
-log = logging.getLogger("file-store-bot")
-
-
-# =========================================================
-# ENVIRONMENT
-# =========================================================
+log = logging.getLogger(__name__)
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 OWNER_ID = int(os.environ["OWNER_ID"])
+DB_CHANNEL_ID = int(os.environ["DB_CHANNEL_ID"])
+BOT_USERNAME = os.environ["BOT_USERNAME"].lstrip("@")
 
-PORT = int(os.getenv("PORT", "10000"))
-BOT_USERNAME = os.getenv("BOT_USERNAME", "").lstrip("@")
-
-# Supabase
 db = Database()
 
-
-# =========================================================
-# BOT
-# =========================================================
-
-bot = Bot(
-    BOT_TOKEN,
-    default=DefaultBotProperties(
-        parse_mode=ParseMode.HTML
-    )
+shortener = Shortener(
+    os.getenv("SHORTENER_API_URL", "https://arolinks.com/api"),
+    os.getenv("SHORTENER_API_KEY", ""),
+    BOT_USERNAME,
+    db,
 )
 
-dp = Dispatcher()
-router = Router()
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"Bot is running!")
 
-dp.include_router(router)
+    def log_message(self, fmt, *args):
+        return
 
+def start_health_server():
+    try:
+        port = int(os.environ.get("PORT", "10000"))
+        server = HTTPServer(("0.0.0.0", port), HealthHandler)
+        log.info("Health server running on port %s", port)
+        server.serve_forever()
+    except Exception:
+        log.exception("Health server error")
 
-# =========================================================
-# FASTAPI
-# =========================================================
-
-app = FastAPI()
-
-
-@app.get("/")
-async def health():
-    return {
-        "ok": True,
-        "service": "telegram-file-store-bot"
-    }
-
-
-@app.get("/health")
-async def health2():
-    return {
-        "ok": True
-    }
-
-
-# =========================================================
-# HELPERS
-# =========================================================
-
-def now():
-    return datetime.now(timezone.utc)
-
-
-def is_owner(user_id: int):
+def is_owner(user_id):
     return user_id == OWNER_ID
 
+def is_admin(user_id):
+    return user_id == OWNER_ID or db.is_admin(user_id)
 
-def is_admin(user_id: int):
-    return is_owner(user_id) or db.is_admin(user_id)
+def bot_link(target):
+    return f"https://t.me/{BOT_USERNAME}?start={target}"
 
+async def send_text(update, text, **kwargs):
+    message = update.effective_message
+    if message:
+        return await message.reply_text(text, **kwargs)
 
-def is_mod(user_id: int):
-    return is_admin(user_id)
+async def delete_later(context, chat_id, message_ids, seconds):
+    await asyncio.sleep(seconds)
+    if not isinstance(message_ids, list):
+        message_ids = [message_ids]
+    for message_id in message_ids:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except TelegramError:
+            pass
 
+def get_delete_seconds():
+    try:
+        return db.get_delete_seconds()
+    except Exception:
+        return 600
 
-def profile_link(user_id: int, name: str):
-    safe_name = name or "User"
-
-    return (
-        f'<a href="tg://user?id={user_id}">'
-        f'{safe_name}</a>'
+async def copy_stored_message(context, chat_id, row):
+    return await context.bot.copy_message(
+        chat_id=chat_id,
+        from_chat_id=row["channel_id"],
+        message_id=row["message_id"],
     )
 
-
-def escape_html(text):
-    if not text:
-        return ""
-
-    return (
-        str(text)
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
+async def send_file(context, chat_id, row):
+    seconds = get_delete_seconds()
+    file_msg = await copy_stored_message(context, chat_id, row)
+    minutes = max(1, seconds // 60)
+    warning = await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"⏳ This file will be automatically deleted in {minutes} minutes."
     )
+    asyncio.create_task(delete_later(
+        context, chat_id, [file_msg.message_id, warning.message_id], seconds
+    ))
 
+async def send_batch(context, chat_id, items):
+    seconds = get_delete_seconds()
+    message_ids = []
+    for row in items:
+        try:
+            msg = await copy_stored_message(context, chat_id, row)
+            message_ids.append(msg.message_id)
+        except TelegramError:
+            log.exception("Batch delivery failed")
 
-def format_remaining(expires_at):
-    try:
-        expiry = datetime.fromisoformat(
-            str(expires_at).replace("Z", "+00:00")
-        )
-
-        if expiry.tzinfo is None:
-            expiry = expiry.replace(
-                tzinfo=timezone.utc
-            )
-
-        remaining = expiry - now()
-
-        if remaining.total_seconds() <= 0:
-            return "0 Days, 0 Hours"
-
-        total_hours = int(
-            remaining.total_seconds() // 3600
-        )
-
-        days = total_hours // 24
-        hours = total_hours % 24
-
-        return f"{days} Days, {hours} Hours"
-
-    except Exception:
-        return "Unknown"
-
-
-def format_days_from_expiry(expires_at):
-    try:
-        expiry = datetime.fromisoformat(
-            str(expires_at).replace("Z", "+00:00")
-        )
-
-        if expiry.tzinfo is None:
-            expiry = expiry.replace(
-                tzinfo=timezone.utc
-            )
-
-        remaining = expiry - now()
-
-        if remaining.total_seconds() <= 0:
-            return 0
-
-        return int(
-            remaining.total_seconds() // 86400
-        )
-
-    except Exception:
-        return 0
-
-
-# =========================================================
-# USER
-# =========================================================
-
-def ensure_user_from_message(message: Message):
-    if not message.from_user:
+    if not message_ids:
+        await context.bot.send_message(chat_id=chat_id, text="❌ Could not deliver the batch.")
         return
 
-    db.add_user(
-        message.from_user.id,
-        message.from_user.username or "",
-        message.from_user.first_name or ""
+    minutes = max(1, seconds // 60)
+    warning = await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"⏳ These {len(message_ids)} files will be automatically deleted in {minutes} minutes."
     )
+    message_ids.append(warning.message_id)
+    asyncio.create_task(delete_later(context, chat_id, message_ids, seconds))
 
+async def check_fsub(update, context):
+    channels = db.list_fsub()
+    if not channels:
+        return True
 
-def get_user_name(user_id: int):
-    return db_user_name(user_id)
+    user_id = update.effective_user.id
+    missing = []
 
-
-def db_user_name(user_id: int):
-    # database.py doesn't expose a direct name getter,
-    # so retrieve from users through Supabase.
-    try:
-        result = db.db.table("users").select(
-            "username, first_name"
-        ).eq(
-            "user_id",
-            user_id
-        ).limit(1).execute()
-
-        if result.data:
-            row = result.data[0]
-
-            return (
-                row.get("first_name")
-                or row.get("username")
-                or f"User {user_id}"
-            )
-
-    except Exception:
-        pass
-
-    try:
-        # Telegram fallback
-        # This function is normally called after the
-        # user's record exists.
-        return f"User {user_id}"
-    except Exception:
-        return f"User {user_id}"
-
-
-async def telegram_user_name(user_id: int):
-    name = get_user_name(user_id)
-
-    if name != f"User {user_id}":
-        return name
-
-    try:
-        chat = await bot.get_chat(user_id)
-
-        if chat.first_name:
-            return chat.first_name
-
-        if chat.username:
-            return chat.username
-
-    except Exception:
-        pass
-
-    return f"User {user_id}"
-
-
-# =========================================================
-# LINK PREVIEW
-# =========================================================
-
-def link_preview_disabled():
-    return LinkPreviewOptions(
-        is_disabled=True
-    )
-
-
-# =========================================================
-# SETTINGS
-# =========================================================
-
-async def get_setting(key, default=None):
-    return db.get_setting(
-        key,
-        default
-    )
-
-
-async def set_setting(key, value):
-    db.set_setting(
-        key,
-        value
-    )
-
-
-# =========================================================
-# START IMAGE
-# =========================================================
-
-async def get_start_image():
-    return await get_setting(
-        "start_image",
-        None
-    )
-
-
-# =========================================================
-# AUTO DELETE
-# =========================================================
-
-def schedule_delete(
-    chat_id: int,
-    message_id: int,
-    seconds: int
-):
-    asyncio.create_task(
-        delete_message_later(
-            chat_id,
-            message_id,
-            seconds
-        )
-    )
-
-
-async def delete_message_later(
-    chat_id: int,
-    message_id: int,
-    seconds: int
-):
-    try:
-        await asyncio.sleep(seconds)
-
-        await bot.delete_message(
-            chat_id,
-            message_id
-        )
-
-    except Exception as e:
-        log.debug(
-            "Auto delete failed: %s",
-            e
-        )
-
-
-async def send_auto_delete_notice(
-    chat_id: int,
-    minutes: int
-):
-    if minutes <= 0:
-        return None
-
-    text = (
-        "<i>This File is deleting automatically "
-        f"in {minutes} minutes. "
-        "Forward in your Saved Messages..!</i>"
-    )
-
-    msg = await bot.send_message(
-        chat_id,
-        text
-    )
-
-    schedule_delete(
-        chat_id,
-        msg.message_id,
-        minutes * 60
-    )
-
-    return msg
-
-
-# =========================================================
-# START INTERFACE
-# =========================================================
-
-START_TEXT = (
-    "<b><i>Hi There...! 💥</i></b>\n\n"
-    "<i>I am a file-store bot.\n"
-    "I can generate links directly with no problems.</i>\n\n"
-    '<b>My Owner:</b> '
-    '<a href="https://t.me/Its_Lozo">@Its_Lozo</a>'
-)
-
-
-def start_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="ABOUT",
-                    callback_data="about"
-                ),
-                InlineKeyboardButton(
-                    text="CLOSE",
-                    callback_data="close"
-                )
-            ]
-        ]
-    )
-
-
-async def send_start_interface(target):
-
-    image = await get_start_image()
-
-    keyboard = start_keyboard()
-
-    if isinstance(target, Message):
-
-        if image:
-            try:
-                return await target.answer_photo(
-                    photo=image,
-                    caption=START_TEXT,
-                    reply_markup=keyboard
-                )
-            except Exception as e:
-                log.warning(
-                    "Start image failed: %s",
-                    e
-                )
-
-        return await target.answer(
-            START_TEXT,
-            reply_markup=keyboard,
-            link_preview_options=link_preview_disabled()
-        )
-
-    message = target.message
-
-    if image:
+    for channel in channels:
         try:
-            return await message.answer_photo(
-                photo=image,
-                caption=START_TEXT,
-                reply_markup=keyboard
-            )
-        except Exception as e:
-            log.warning(
-                "Start image failed: %s",
-                e
-            )
+            member = await context.bot.get_chat_member(channel["channel_id"], user_id)
+            if member.status in ("left", "kicked"):
+                missing.append(channel)
+        except TelegramError as e:
+            log.warning("FSUB check failed for %s: %s", channel["channel_id"], e)
 
-    return await message.answer(
-        START_TEXT,
-        reply_markup=keyboard,
-        link_preview_options=link_preview_disabled()
-    )
-
-
-# =========================================================
-# ABOUT
-# =========================================================
-
-ABOUT_TEXT = (
-    "<b><i>About Us..</i></b>\n\n"
-    "<i>"
-    "➤ Made for : "
-    '<a href="https://t.me/Anime_Hub_94">Anime Hub</a>\n'
-    "➤ Owner : "
-    '<a href="https://t.me/Its_Lozo">@Its_Lozo</a>\n'
-    "➤ Developer : "
-    '<a href="https://t.me/Its_Lozo">@Its_Lozo</a>\n\n'
-    "Adios !!"
-    "</i>"
-)
-
-
-def about_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="BACK",
-                    callback_data="back_start"
-                ),
-                InlineKeyboardButton(
-                    text="CLOSE",
-                    callback_data="close"
-                )
-            ]
-        ]
-    )
-
-
-@router.callback_query(
-    F.data == "about"
-)
-async def about_callback(
-    callback: CallbackQuery
-):
-    await callback.answer()
-
-    try:
-        await callback.message.edit_caption(
-            caption=ABOUT_TEXT,
-            reply_markup=about_keyboard()
-        )
-    except Exception:
-        try:
-            await callback.message.edit_text(
-                ABOUT_TEXT,
-                reply_markup=about_keyboard()
-            )
-        except Exception as e:
-            log.warning(
-                "About edit failed: %s",
-                e
-            )
-
-
-@router.callback_query(
-    F.data == "back_start"
-)
-async def back_start_callback(
-    callback: CallbackQuery
-):
-    await callback.answer()
-
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-
-    await send_start_interface(callback)
-
-
-@router.callback_query(
-    F.data == "close"
-)
-async def close_callback(
-    callback: CallbackQuery
-):
-    await callback.answer()
-
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-
-
-# =========================================================
-# MEDIA DETECTION
-# =========================================================
-
-def media_kind(message: Message):
-
-    if message.photo:
-        return "photo"
-
-    if message.video:
-        return "video"
-
-    if message.document:
-        return "document"
-
-    if message.audio:
-        return "audio"
-
-    if message.voice:
-        return "voice"
-
-    if message.animation:
-        return "animation"
-
-    if message.sticker:
-        return "sticker"
-
-    if message.text or message.caption:
-        return "text"
-
-    return None
-
-
-# =========================================================
-# PARSE TELEGRAM CHANNEL LINK
-# =========================================================
-
-def parse_link(link: str):
-
-    link = link.strip()
-
-    match = re.match(
-        r"https?://t\.me/c/(\d+)/(\d+)",
-        link
-    )
-
-    if match:
-        return (
-            int("-100" + match.group(1)),
-            int(match.group(2))
-        )
-
-    match = re.match(
-        r"https?://t\.me/([A-Za-z0-9_]+)/(\d+)",
-        link
-    )
-
-    if match:
-        return (
-            "@" + match.group(1),
-            int(match.group(2))
-        )
-
-    return None
-
-
-# =========================================================
-# FSUB
-# =========================================================
-
-async def get_fsub_channels():
-    return await get_setting(
-        "fsub_channels",
-        []
-    )
-
-
-async def save_fsub_channels(items):
-    await set_setting(
-        "fsub_channels",
-        items
-    )
-
-
-async def check_user_joined(
-    user_id: int,
-    channel_id
-):
-
-    try:
-        member = await bot.get_chat_member(
-            chat_id=channel_id,
-            user_id=user_id
-        )
-
-        raw_status = getattr(
-            member,
-            "status",
-            None
-        )
-
-        status = getattr(
-            raw_status,
-            "value",
-            str(raw_status)
-        )
-
-        status = str(status).lower()
-
-        if status in (
-            "creator",
-            "administrator",
-            "member"
-        ):
-            return True
-
-        if status == "restricted":
-            return bool(
-                getattr(
-                    member,
-                    "is_member",
-                    False
-                )
-            )
-
-        return False
-
-    except Exception as e:
-        log.warning(
-            "FSUB check failed: %s",
-            e
-        )
-
-        return False
-
-
-async def build_fsub_message(
-    user_id: int
-):
-
-    fsubs = await get_fsub_channels()
-
-    if not fsubs:
-        return None, None, True
-
-    lines = [
-        "🔵 <b>Hello There..!⚡</b>",
-        "",
-        "⭕ Please join all of our channels first "
-        "then try again..!",
-        "",
-        "<b>Channel Subscription Status:</b>",
-        ""
-    ]
+    if not missing:
+        return True
 
     buttons = []
-    all_joined = True
+    for channel in missing:
+        link = channel.get("invite_link") or channel.get("username")
+        title = channel.get("title") or "Join Channel"
+        if link:
+            buttons.append([InlineKeyboardButton(f"📢 {title}", url=link)])
 
-    for index, channel in enumerate(
-        fsubs,
-        start=1
-    ):
+    buttons.append([InlineKeyboardButton("✅ Check Subscription", callback_data="check_fsub")])
 
-        channel_id = channel.get("chat_id")
-
-        title = channel.get(
-            "title",
-            "Channel"
-        )
-
-        joined = await check_user_joined(
-            user_id,
-            channel_id
-        )
-
-        if joined:
-            lines.append(
-                f"{index}. <b>{title}</b> - "
-                "<b>JOINED</b> ✅"
-            )
-        else:
-            all_joined = False
-
-            lines.append(
-                f"{index}. <b>{title}</b> - "
-                "<b>NOT JOINED</b> ❌"
-            )
-
-            invite = channel.get(
-                "invite_link"
-            )
-
-            if invite:
-                buttons.append(
-                    [
-                        InlineKeyboardButton(
-                            text=f"Join {title}",
-                            url=invite
-                        )
-                    ]
-                )
-
-    if not all_joined:
-        buttons.append(
-            [
-                InlineKeyboardButton(
-                    text="🔄 Try Again",
-                    callback_data="fsub_check"
-                )
-            ]
-        )
-
-    keyboard = None
-
-    if buttons:
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=buttons
-        )
-
-    return (
-        "\n".join(lines),
-        keyboard,
-        all_joined
+    await send_text(
+        update,
+        "🔒 <b>Join Required Channel(s)</b>\n\nPlease join all required channels and then press <b>Check Subscription</b>.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(buttons),
     )
+    return False
 
+async def fsub_callback(update, context):
+    query = update.callback_query
+    await query.answer()
+    try:
+        await query.message.delete()
+    except TelegramError:
+        pass
 
-async def show_fsub(message: Message):
-
-    text, keyboard, all_joined = (
-        await build_fsub_message(
-            message.from_user.id
-        )
-    )
-
-    if all_joined:
-        return False
-
-    image = await get_start_image()
-
-    if image:
-        try:
-            await message.answer_photo(
-                photo=image,
-                caption=text,
-                reply_markup=keyboard
-            )
-            return True
-        except Exception:
-            pass
-
-    await message.answer(
-        text,
-        reply_markup=keyboard
-    )
-
-    return True
-
-
-@router.callback_query(
-    F.data == "fsub_check"
-)
-async def fsub_check_callback(
-    callback: CallbackQuery
-):
-
-    text, keyboard, all_joined = (
-        await build_fsub_message(
-            callback.from_user.id
-        )
-    )
-
-    if all_joined:
-        await callback.answer(
-            "✅ All channels joined!"
-        )
-
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-
-        await send_start_interface(callback)
+    if not await check_fsub(update, context):
         return
 
-    await callback.answer(
-        "❌ You haven't joined all channels yet.",
-        show_alert=True
+    await query.message.chat.send_message(
+        "✅ Subscription verified.\n\nNow open your file link again."
     )
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_id = user.id
 
     try:
-        await callback.message.edit_caption(
-            caption=text,
-            reply_markup=keyboard
-        )
+        db.add_user(user_id, user.username or "", user.first_name or "")
     except Exception:
-        try:
-            await callback.message.edit_text(
-                text,
-                reply_markup=keyboard
-            )
-        except Exception:
-            pass
+        log.exception("Could not save user")
 
-
-# =========================================================
-# START
-# =========================================================
-
-@router.message(
-    CommandStart()
-)
-async def start(
-    message: Message
-):
-
-    ensure_user_from_message(message)
-
-    if db.is_banned(
-        message.from_user.id
-    ):
-        return await message.answer(
-            "🚫 You are banned from using this bot."
-        )
-
-    args = (
-        (message.text or "")
-        .split(maxsplit=1)
-    )
-
-    # =====================================================
-    # BATCH LINK
-    # =====================================================
-
-    if (
-        len(args) == 2
-        and args[1].startswith("batch_")
-    ):
-
-        if await show_fsub(message):
+    try:
+        if db.is_banned(user_id):
+            await send_text(update, "🚫 You are blocked from using this bot.")
             return
+    except Exception:
+        pass
 
-        batch_id = args[1][6:]
+    arg = context.args[0] if context.args else ""
 
-        items = db.get_batch_items(
-            batch_id
+    if arg.startswith("verify_"):
+        await verify_token(update, context, arg[7:])
+        return
+
+    if not await check_fsub(update, context):
+        return
+
+    if arg.startswith("file_"):
+        await deliver_file(update, context, arg[5:])
+        return
+
+    if arg.startswith("batch_"):
+        await deliver_batch(update, context, arg[6:])
+        return
+
+    await update.message.reply_photo(
+        photo="AgACAgUAAxkBAAIBn2qYRu_se2kINHefqBDGHTiw9ibyAAIiE2sbavbBVKy00PfhiLg9AQADAgADeAADPQQ",
+        caption=(
+            f"⚡ <b>HEY, {update.effective_user.first_name} ~</b>\n\n"
+            "I AM FILE STORE BOT, I CAN STORE PRIVATE "
+            "FILES IN SPECIFIED CHANNEL AND OTHER USERS "
+            "CAN ACCESS IT FROM SPECIAL LINK."
+        ),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("↗ • ANIME HUB", url="https://t.me/Anime_Hub_94"),
+                InlineKeyboardButton("ABOUT •", callback_data="about"),
+            ],
+            [
+                InlineKeyboardButton("• CLOSE •", callback_data="close"),
+            ],
+        ]),
+    )
+
+async def id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    if not msg or not msg.reply_to_message:
+        await msg.reply_text("📸 Kisi photo ko reply karke /id bhejo.")
+        return
+
+    replied = msg.reply_to_message
+    if replied.photo:
+        photo_id = replied.photo[-1].file_id
+        await msg.reply_text(
+            f"🆔 <b>Photo File ID:</b>\n\n<code>{photo_id}</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    await msg.reply_text("❌ Replied message me photo nahi hai.")
+
+async def help_cmd(update, context):
+    await send_text(update, """
+📚 <b>Bot Commands</b>
+
+<b>User Commands</b>
+
+/start - Wake up bot
+/my_plan - Check premium
+/request - Submit movie/series request
+
+<b>Admin Commands</b>
+
+/auto_del - Auto delete settings
+/fsub_chnl - View FSUB channels
+/add_banuser - Ban user
+/del_banuser - Unban user
+/banuser_list - Banned users
+
+/add_premium - Add premium
+/remove_premium - Remove premium
+/list_premium - Premium users
+
+/add_fsub - Add force-sub channel
+/del_fsub - Remove force-sub channel
+
+/broadcast - Broadcast
+/pbroadcast - Broadcast + pin
+
+/batch - Create batch
+/genlink - Generate file link
+
+<b>Owner Commands</b>
+
+/add_admins - Add admin
+/del_admins - Remove admin
+/admin_list - Admin list
+/users - Total users
+
+/cancel - Cancel setup
+""", parse_mode="HTML")
+
+async def save_cmd(update, context):
+    if not is_admin(update.effective_user.id):
+        return
+
+    msg = update.message.reply_to_message
+    if not msg:
+        await send_text(update, "Reply to a file/post with /save.")
+        return
+
+    try:
+        copied = await context.bot.copy_message(
+            chat_id=DB_CHANNEL_ID,
+            from_chat_id=msg.chat_id,
+            message_id=msg.message_id,
         )
 
+        file_id = db.add_file(DB_CHANNEL_ID, copied.message_id, msg.caption or "")
+        link = bot_link(f"file_{file_id}")
+        share_url = "https://telegram.me/share/url?url=" + quote(link, safe="")
+
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📤 Share Link", url=share_url)]
+        ])
+
+        try:
+            await context.bot.edit_message_reply_markup(
+                chat_id=DB_CHANNEL_ID,
+                message_id=copied.message_id,
+                reply_markup=keyboard,
+            )
+        except TelegramError:
+            log.exception("Could not add share button")
+
+        await send_text(
+            update,
+            f"✅ <b>File Saved!</b>\n\n🆔 File ID: <code>{file_id}</code>\n\n🤖 Bot Link:\n{link}",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        log.exception("SAVE ERROR")
+        await send_text(update, f"❌ Could not save file:\n{e}")
+
+async def genlink_cmd(update, context):
+    if not is_admin(update.effective_user.id):
+        return
+    if len(context.args) != 1:
+        await send_text(update, "Usage: /genlink <file_id>")
+        return
+
+    file_id = context.args[0]
+    if not db.get_file(file_id):
+        await send_text(update, "❌ File not found.")
+        return
+
+    await send_text(update, f"🔗 <b>Bot Link</b>\n\n{bot_link('file_' + file_id)}", parse_mode="HTML")
+
+async def get_cmd(update, context):
+    if len(context.args) != 1:
+        await send_text(update, "Usage: /get <file_id>")
+        return
+    await deliver_file(update, context, context.args[0])
+
+async def deliver_file(update, context, file_id):
+    if not await check_fsub(update, context):
+        return
+
+    row = db.get_file(file_id)
+    if not row:
+        await send_text(update, "❌ File not found.")
+        return
+
+    user_id = update.effective_user.id
+    if db.is_premium(user_id):
+        await send_file(context, update.effective_chat.id, row)
+        return
+
+    short_url = shortener.create(file_id, user_id)
+    if not short_url:
+        await send_text(update, "⚠️ Shortener is not configured correctly.")
+        return
+
+    await send_text(
+        update,
+        "🔐 <b>Continue to unlock</b>\n\nComplete the shortener first. After verification, Telegram will bring you back to the bot.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔗 Continue", url=short_url)]
+        ]),
+    )
+
+async def batch_cmd(update, context):
+    if not is_admin(update.effective_user.id):
+        return
+    if not context.args:
+        await send_text(update, "Usage: /batch <file_id> <file_id> ...")
+        return
+
+    valid = [file_id for file_id in context.args if db.get_file(file_id)]
+    if not valid:
+        await send_text(update, "❌ No valid file IDs.")
+        return
+
+    batch_id = db.create_batch(valid)
+    await send_text(
+        update,
+        f"📦 <b>Batch Created</b>\n\nFiles: {len(valid)}\n🆔 {batch_id}\n\n🤖 Bot Link:\n{bot_link('batch_' + batch_id)}",
+        parse_mode="HTML",
+    )
+
+async def deliver_batch(update, context, batch_id):
+    if not await check_fsub(update, context):
+        return
+
+    items = db.get_batch_items(batch_id)
+    if not items:
+        await send_text(update, "❌ Batch not found or empty.")
+        return
+
+    user_id = update.effective_user.id
+    if db.is_premium(user_id):
+        await send_batch(context, update.effective_chat.id, items)
+        return
+
+    short_url = shortener.create(f"batch:{batch_id}", user_id)
+    if not short_url:
+        await send_text(update, "⚠️ Shortener is not configured correctly.")
+        return
+
+    await send_text(
+        update,
+        f"📦 This batch contains <b>{len(items)}</b> files.\n\nComplete the shortener to unlock.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔗 Continue", url=short_url)]
+        ]),
+    )
+
+async def verify_token(update, context, token):
+    payload = shortener.verify(token)
+    if not payload:
+        await send_text(update, "❌ Invalid, expired, or already-used token.")
+        return
+
+    token_user_id, target = payload
+    current_user_id = update.effective_user.id
+
+    if token_user_id != 0 and token_user_id != current_user_id:
+        await send_text(update, "❌ This verification link belongs to another user.")
+        return
+
+    if target.startswith("batch:"):
+        items = db.get_batch_items(target[6:])
         if not items:
-            return await message.answer(
-                "❌ Batch not found or expired."
-            )
-
-        wait_msg = await message.answer(
-            "Please Wait....."
-        )
-
-        sent_messages = []
-
-        for item in items:
-            try:
-                copied = await bot.copy_message(
-                    chat_id=message.chat.id,
-                    from_chat_id=item["channel_id"],
-                    message_id=item["message_id"]
-                )
-
-                sent_messages.append(copied)
-
-                await asyncio.sleep(0.02)
-
-            except Exception as e:
-                log.warning(
-                    "Batch copy failed: %s",
-                    e
-                )
-
-        try:
-            await wait_msg.delete()
-        except Exception:
-            pass
-
-        delete_minutes = int(
-            await get_setting(
-                "auto_delete_minutes",
-                5
-            )
-        )
-
-        if delete_minutes > 0:
-
-            for sent in sent_messages:
-                schedule_delete(
-                    message.chat.id,
-                    sent.message_id,
-                    delete_minutes * 60
-                )
-
-            await send_auto_delete_notice(
-                message.chat.id,
-                delete_minutes
-            )
-
+            await send_text(update, "❌ Batch not found or empty.")
+            return
+        await send_batch(context, update.effective_chat.id, items)
         return
 
-    # =====================================================
-    # NORMAL START
-    # =====================================================
-
-    if await show_fsub(message):
+    row = db.get_file(target)
+    if not row:
+        await send_text(update, "❌ File not found.")
         return
+    await send_file(context, update.effective_chat.id, row)
 
-    await send_start_interface(message)
+async def verify_cmd(update, context):
+    if len(context.args) != 1:
+        await send_text(update, "Usage: /verify <token>")
+        return
+    await verify_token(update, context, context.args[0])
 
-
-# =========================================================
-# GENLINK
-# =========================================================
-
-@router.message(
-    Command("genlink")
-)
-async def genlink(
-    message: Message
-):
-
-    ensure_user_from_message(message)
-
-    if not is_mod(
-        message.from_user.id
-    ):
-        return await message.answer(
-            "⛔ Only Owner, Admins and Moderators "
-            "can generate links."
-        )
-
-    if not message.reply_to_message:
-        return await message.answer(
-            "Reply to any message/file and use "
-            "<code>/genlink</code>."
-        )
-
-    source = message.reply_to_message
-
-    if not media_kind(source):
-        return await message.answer(
-            "❌ This message cannot be stored."
-        )
-
-    file_id = db.add_file(
-        source.chat.id,
-        source.message_id,
-        source.caption or source.text or ""
+async def my_plan_cmd(update, context):
+    plan = db.get_premium(update.effective_user.id)
+    if not plan:
+        await send_text(update, "📋 <b>Plan:</b> Free\n\nNo active premium membership.", parse_mode="HTML")
+        return
+    await send_text(
+        update,
+        f"💎 <b>Premium Active</b>\n\n👤 User ID: {update.effective_user.id}\n⏳ Expires: {plan['expires_at']}",
+        parse_mode="HTML",
     )
 
-    batch_id = db.create_batch(
-        [file_id]
-    )
+async def add_premium_cmd(update, context):
+    if not is_admin(update.effective_user.id):
+        return
+    if len(context.args) != 2:
+        await send_text(update, "Usage: /add_premium <user_id> <days>")
+        return
+    try:
+        user_id = int(context.args[0])
+        days = int(context.args[1])
+        db.add_premium(user_id, days)
+        await send_text(update, f"💎 Premium added for {user_id} for {days} days.")
+    except ValueError:
+        await send_text(update, "❌ User ID and days must be numbers.")
 
-    username = await get_bot_username()
+async def remove_premium_cmd(update, context):
+    if not is_admin(update.effective_user.id):
+        return
+    if len(context.args) != 1:
+        await send_text(update, "Usage: /remove_premium <user_id>")
+        return
+    try:
+        db.remove_premium(int(context.args[0]))
+        await send_text(update, "✅ Premium removed.")
+    except ValueError:
+        await send_text(update, "❌ Invalid user ID.")
 
-    link = (
-        f"https://t.me/{username}"
-        f"?start=batch_{batch_id}"
-    )
-
-    await message.answer(
-        "🔗 <b>Link created!</b>\n\n"
-        f"{link}",
-        link_preview_options=link_preview_disabled()
-    )
-
-
-# =========================================================
-# BOT USERNAME
-# =========================================================
-
-async def get_bot_username():
-
-    global BOT_USERNAME
-
-    if BOT_USERNAME:
-        return BOT_USERNAME
-
-    me = await bot.get_me()
-
-    BOT_USERNAME = me.username or ""
-
-    return BOT_USERNAME
-
-
-# =========================================================
-# BATCH
-# =========================================================
-
-@router.message(
-    Command("batch")
-)
-async def batch(
-    message: Message
-):
-
-    ensure_user_from_message(message)
-
-    if not is_mod(
-        message.from_user.id
-    ):
-        return await message.answer(
-            "⛔ Only Owner, Admins and Moderators "
-            "can create batches."
-        )
-
-    parts = (
-        message.text or ""
-    ).split()
-
-    if len(parts) != 3:
-        return await message.answer(
-            "Usage:\n"
-            "<code>/batch LINK1 LINK2</code>\n\n"
-            "Both links must be from the same channel."
-        )
-
-    first = parse_link(parts[1])
-    second = parse_link(parts[2])
-
-    if not first or not second:
-        return await message.answer(
-            "❌ Invalid Telegram channel post link."
-        )
-
-    if first[0] != second[0]:
-        return await message.answer(
-            "❌ Both posts must be from the same channel."
-        )
-
-    chat_id = first[0]
-
-    lo, hi = sorted([
-        first[1],
-        second[1]
-    ])
-
-    file_ids = []
-
-    # database.py doesn't expose a range query,
-    # so use the files table directly through Supabase.
-    result = db.db.table("files").select(
-        "*"
-    ).eq(
-        "channel_id",
-        int(chat_id)
-    ).gte(
-        "message_id",
-        lo
-    ).lte(
-        "message_id",
-        hi
-    ).order(
-        "message_id"
-    ).execute()
-
-    rows = result.data or []
-
+async def list_premium_cmd(update, context):
+    if not is_admin(update.effective_user.id):
+        return
+    rows = db.list_premium()
     if not rows:
-        return await message.answer(
-            "❌ I don't have these channel posts "
-            "recorded yet."
-        )
-
+        await send_text(update, "💎 No active premium accounts.")
+        return
+    text = "💎 <b>Active Premium Users</b>\n\n"
     for row in rows:
-        file_ids.append(
-            row["file_id"]
-        )
-
-    if not file_ids:
-        return await message.answer(
-            "❌ No supported posts found."
-        )
-
-    batch_id = db.create_batch(
-        file_ids
-    )
-
-    username = await get_bot_username()
-
-    link = (
-        f"https://t.me/{username}"
-        f"?start=batch_{batch_id}"
-    )
-
-    await message.answer(
-        "✅ <b>Batch created!</b>\n\n"
-        f"📦 Items: <b>{len(file_ids)}</b>\n"
-        f"🔗 {link}",
-        link_preview_options=link_preview_disabled()
-    )
-
-
-# =========================================================
-# PREMIUM
-# =========================================================
-
-async def notify_premium_activated(
-    user_id: int,
-    days: int
-):
-
-    text = (
-        "🎉 <b>Congratulations!</b>\n\n"
-        "Your account has been upgraded to the "
-        f"Premium Ad-Free Tier for the next "
-        f"<b>{days} Days</b>.\n"
-        "Enjoy high-speed bypass-free file downloads!"
-    )
-
-    try:
-        await bot.send_message(
-            user_id,
-            text
-        )
-        return True
-    except Exception as e:
-        log.warning(
-            "Premium activation notification failed "
-            "for %s: %s",
-            user_id,
-            e
-        )
-        return False
-
-
-async def notify_premium_revoked(
-    user_id: int
-):
-
-    text = (
-        "🚨 <b>Notification:</b> Your premium "
-        "subscription package has been manually "
-        "revoked by the management team."
-    )
-
-    try:
-        await bot.send_message(
-            user_id,
-            text
-        )
-        return True
-    except Exception as e:
-        log.warning(
-            "Premium revoke notification failed "
-            "for %s: %s",
-            user_id,
-            e
-        )
-        return False
-
-
-# =========================================================
-# ADD PREMIUM
-# =========================================================
-
-@router.message(
-    Command("addpremium")
-)
-async def addpremium(
-    message: Message
-):
-
-    ensure_user_from_message(message)
-
-    if not is_admin(
-        message.from_user.id
-    ):
-        return await message.answer(
-            "⛔ Admin only."
-        )
-
-    parts = (
-        message.text or ""
-    ).split()
-
-    if (
-        len(parts) != 3
-        or not parts[1].isdigit()
-        or not parts[2].isdigit()
-    ):
-        return await message.answer(
-            "Usage:\n"
-            "<code>/addpremium USER_ID DAYS</code>"
-        )
-
-    user_id = int(parts[1])
-    days = int(parts[2])
-
-    if days <= 0:
-        return await message.answer(
-            "❌ Days must be greater than 0."
-        )
-
-    try:
-        db.add_premium(
-            user_id,
-            days
-        )
-
-        await notify_premium_activated(
-            user_id,
-            days
-        )
-
-        user_name = await telegram_user_name(
-            user_id
-        )
-
-        await message.answer(
-            "🎉 <b>Premium Activated!</b>\n\n"
-            f"👤 {profile_link(user_id, user_name)}\n"
-            f"🆔 <code>{user_id}</code>\n"
-            f"💎 Plan: <b>{days} Days</b>"
-        )
-
-    except Exception as e:
-
-        log.exception(
-            "Premium activation error"
-        )
-
-        await message.answer(
-            f"❌ Failed to activate premium.\n"
-            f"<code>{escape_html(e)}</code>"
-        )
-
-
-# =========================================================
-# REMOVE PREMIUM
-# =========================================================
-
-@router.message(
-    Command("delpremium")
-)
-async def delpremium(
-    message: Message
-):
-
-    ensure_user_from_message(message)
-
-    if not is_admin(
-        message.from_user.id
-    ):
-        return await message.answer(
-            "⛔ Admin only."
-        )
-
-    parts = (
-        message.text or ""
-    ).split()
-
-    if (
-        len(parts) != 2
-        or not parts[1].isdigit()
-    ):
-        return await message.answer(
-            "Usage:\n"
-            "<code>/delpremium USER_ID</code>"
-        )
-
-    user_id = int(parts[1])
-
-    if not db.is_premium(user_id):
-        return await message.answer(
-            "❌ This user does not have an active "
-            "premium subscription."
-        )
-
-    user_name = await telegram_user_name(
-        user_id
-    )
-
-    db.remove_premium(
-        user_id
-    )
-
-    await notify_premium_revoked(
-        user_id
-    )
-
-    await message.answer(
-        "🗑 <b>Premium Subscription Tier Revoked!</b>\n\n"
-        f"👤 {profile_link(user_id, user_name)}\n"
-        f"🆔 <code>{user_id}</code>"
-    )
-
-
-# =========================================================
-# MY PLAN
-# =========================================================
-
-@router.message(
-    Command("myplan")
-)
-async def myplan(
-    message: Message
-):
-
-    ensure_user_from_message(message)
-
-    user_id = message.from_user.id
-
-    premium = db.get_premium(
-        user_id
-    )
-
-    user_name = (
-        message.from_user.first_name
-        or message.from_user.username
-        or "User"
-    )
-
-    if not premium:
-
-        return await message.answer(
-            "👑 <b>YOUR PREMIUM MEMBERSHIP STATUS</b>\n\n"
-            f"👤 Name: {escape_html(user_name)}\n"
-            f"🆔 User ID: <code>{user_id}</code>\n"
-            "💎 Plan Status: <b>Inactive</b>\n"
-            "⏳ Time Remaining: <b>0 Days, 0 Hours</b>"
-        )
-
-    remaining = format_remaining(
-        premium["expires_at"]
-    )
-
-    await message.answer(
-        "👑 <b>YOUR PREMIUM MEMBERSHIP STATUS</b>\n\n"
-        f"👤 Name: {escape_html(user_name)}\n"
-        f"🆔 User ID: <code>{user_id}</code>\n"
-        "💎 Plan Status: <b>Active</b>\n"
-        f"⏳ Time Remaining: <b>{remaining}</b>"
-    )
-
-
-# =========================================================
-# PREMIUM ALIAS
-# =========================================================
-
-@router.message(
-    Command("premium")
-)
-async def premium_alias(
-    message: Message
-):
-    await myplan(message)
-
-
-# =========================================================
-# ADD ADMIN
-# =========================================================
-
-@router.message(
-    Command("addadmin")
-)
-async def addadmin(
-    message: Message
-):
-
-    if not is_owner(
-        message.from_user.id
-    ):
-        return await message.answer(
-            "⛔ Owner only."
-        )
-
-    parts = (
-        message.text or ""
-    ).split()
-
-    if (
-        len(parts) != 2
-        or not parts[1].isdigit()
-    ):
-        return await message.answer(
-            "Usage:\n"
-            "<code>/addadmin USER_ID</code>"
-        )
-
-    uid = int(parts[1])
-
-    name = await telegram_user_name(uid)
-
-    db.add_admin(uid)
-
-    await message.answer(
-        "✅ <b>Admin added!</b>\n\n"
-        f"👤 {profile_link(uid, name)}\n"
-        f"🆔 <code>{uid}</code>"
-    )
-
-
-# =========================================================
-# DELETE ADMIN
-# =========================================================
-
-@router.message(
-    Command("deladmin")
-)
-async def deladmin(
-    message: Message
-):
-
-    if not is_owner(
-        message.from_user.id
-    ):
-        return await message.answer(
-            "⛔ Owner only."
-        )
-
-    parts = (
-        message.text or ""
-    ).split()
-
-    if (
-        len(parts) != 2
-        or not parts[1].isdigit()
-    ):
-        return await message.answer(
-            "Usage:\n"
-            "<code>/deladmin USER_ID</code>"
-        )
-
-    uid = int(parts[1])
-
-    db.remove_admin(uid)
-
-    await message.answer(
-        "✅ Admin removed."
-    )
-
-
-# =========================================================
-# BAN
-# =========================================================
-
-@router.message(
-    Command("ban")
-)
-async def ban(
-    message: Message
-):
-
-    ensure_user_from_message(message)
-
-    if not is_mod(
-        message.from_user.id
-    ):
-        return await message.answer(
-            "⛔ Moderator/Admin only."
-        )
-
-    parts = (
-        message.text or ""
-    ).split()
-
-    if (
-        len(parts) != 2
-        or not parts[1].isdigit()
-    ):
-        return await message.answer(
-            "Usage:\n"
-            "<code>/ban USER_ID</code>"
-        )
-
-    uid = int(parts[1])
-
-    db.ban_user(
-        uid,
-        message.from_user.id
-    )
-
-    await message.answer(
-        "🚫 User banned."
-    )
-
-
-# =========================================================
-# UNBAN
-# =========================================================
-
-@router.message(
-    Command("unban")
-)
-async def unban(
-    message: Message
-):
-
-    if not is_mod(
-        message.from_user.id
-    ):
-        return await message.answer(
-            "⛔ Moderator/Admin only."
-        )
-
-    parts = (
-        message.text or ""
-    ).split()
-
-    if (
-        len(parts) != 2
-        or not parts[1].isdigit()
-    ):
-        return await message.answer(
-            "Usage:\n"
-            "<code>/unban USER_ID</code>"
-        )
-
-    uid = int(parts[1])
-
-    db.unban_user(uid)
-
-    await message.answer(
-        "✅ User unbanned."
-    )
-
-
-# =========================================================
-# ADMINS LIST
-# =========================================================
-
-@router.message(
-    Command("admins")
-)
-async def admins_list(
-    message: Message
-):
-
-    if not is_mod(
-        message.from_user.id
-    ):
-        return await message.answer(
-            "⛔ Admin/Moderator only."
-        )
-
-    text = (
-        "👑 <b>Owner</b>\n"
-        f"🆔 <code>{OWNER_ID}</code>\n\n"
-        "🛡 <b>Admins</b>\n"
-    )
-
-    admin_list = db.list_admins()
-
-    if admin_list:
-        for uid in admin_list:
-            name = await telegram_user_name(uid)
-
-            text += (
-                f"• {profile_link(uid, name)} "
-                f"— <code>{uid}</code>\n"
-            )
-    else:
-        text += "• None\n"
-
-    await message.answer(text)
-
-
-# =========================================================
-# SET IMAGE
-# =========================================================
-
-async def set_image_from_message(
-    message: Message
-):
-
-    if not message.reply_to_message:
-        return False
-
-    photo = message.reply_to_message.photo
-
-    if not photo:
-        return False
-
-    file_id = photo[-1].file_id
-
-    await set_setting(
-        "start_image",
-        file_id
-    )
-
-    return True
-
-
-@router.message(
-    Command("setimage")
-)
-async def setimage_command(
-    message: Message
-):
-
-    if not is_admin(
-        message.from_user.id
-    ):
-        return await message.answer(
-            "⛔ Admin only."
-        )
-
-    if await set_image_from_message(message):
-        return await message.answer(
-            "✅ <b>Start image updated successfully.</b>"
-        )
-
-    await message.answer(
-        "🖼 <b>Set Start Image</b>\n\n"
-        "Settings → Set Image me jaakar "
-        "photo bhejiye."
-    )
-
-
-# =========================================================
-# SETTINGS KEYBOARD
-# =========================================================
-
-def settings_keyboard():
-
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🖼 Set Image",
-                    callback_data="settings_image"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="⏱ Auto Delete",
-                    callback_data="settings_autodelete"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📢 Force Subscribe",
-                    callback_data="settings_fsub"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="👑 Admins",
-                    callback_data="settings_admins"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🛡 Moderators",
-                    callback_data="settings_mods"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="❌ Close",
-                    callback_data="close"
-                )
-            ]
-        ]
-    )
-
-
-@router.message(
-    Command("settings")
-)
-async def settings_command(
-    message: Message
-):
-
-    if not is_admin(
-        message.from_user.id
-    ):
-        return await message.answer(
-            "⛔ Admin only."
-        )
-
-    await message.answer(
-        "⚙️ <b>Settings</b>\n\n"
-        "<i>Please choose an option below.</i>",
-        reply_markup=settings_keyboard()
-    )
-
-
-# =========================================================
-# SETTINGS IMAGE
-# =========================================================
-
-@router.callback_query(
-    F.data == "settings_image"
-)
-async def settings_image_callback(
-    callback: CallbackQuery
-):
-
-    if not is_admin(
-        callback.from_user.id
-    ):
-        return await callback.answer(
-            "⛔ Admin only.",
-            show_alert=True
-        )
-
-    await callback.answer()
-
-    await callback.message.edit_text(
-        "🖼 <b>Set Start Image</b>\n\n"
-        "Ab isi chat me koi bhi new photo bhej dijiye.\n"
-        "Bot automatically usse start image set kar dega.",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="🔙 Back",
-                        callback_data="settings_back"
-                    )
-                ]
-            ]
-        )
-    )
-
-    # Pending image state
-    current = await get_setting(
-        "pending_image_users",
-        []
-    )
-
-    if callback.from_user.id not in current:
-        current.append(
-            callback.from_user.id
-        )
-
-    await set_setting(
-        "pending_image_users",
-        current
-    )
-
-
-@router.message(
-    F.photo
-)
-async def receive_new_start_image(
-    message: Message
-):
-
-    if not message.from_user:
+        text += f"• {row['user_id']} — {row['expires_at']}\n"
+    await send_text(update, text, parse_mode="HTML")
+
+async def add_fsub_cmd(update, context):
+    if not is_admin(update.effective_user.id):
+        return
+    if len(context.args) < 1:
+        await send_text(update, "Usage:\n/add_fsub <channel_id>\n\nOptional:\n/add_fsub <channel_id> <invite_link>")
         return
 
-    if not is_admin(
-        message.from_user.id
-    ):
-        return
-
-    pending = await get_setting(
-        "pending_image_users",
-        []
-    )
-
-    if message.from_user.id not in pending:
-        return
-
-    file_id = message.photo[-1].file_id
-
-    await set_setting(
-        "start_image",
-        file_id
-    )
-
-    pending = [
-        uid
-        for uid in pending
-        if uid != message.from_user.id
-    ]
-
-    await set_setting(
-        "pending_image_users",
-        pending
-    )
-
-    await message.answer(
-        "✅ <b>Start image updated successfully.</b>"
-    )
-
-
-# =========================================================
-# AUTO DELETE SETTINGS
-# =========================================================
-
-@router.callback_query(
-    F.data == "settings_autodelete"
-)
-async def settings_autodelete(
-    callback: CallbackQuery
-):
-
-    if not is_admin(
-        callback.from_user.id
-    ):
-        return await callback.answer(
-            "⛔ Admin only.",
-            show_alert=True
-        )
-
-    current = await get_setting(
-        "auto_delete_minutes",
-        5
-    )
-
-    await callback.answer()
-
-    await callback.message.edit_text(
-        "⏱ <b>Auto Delete Settings</b>\n\n"
-        f"Current: <b>{current} minutes</b>",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="1 Minute",
-                        callback_data="ad_1"
-                    ),
-                    InlineKeyboardButton(
-                        text="5 Minutes",
-                        callback_data="ad_5"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="10 Minutes",
-                        callback_data="ad_10"
-                    ),
-                    InlineKeyboardButton(
-                        text="30 Minutes",
-                        callback_data="ad_30"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="60 Minutes",
-                        callback_data="ad_60"
-                    ),
-                    InlineKeyboardButton(
-                        text="OFF",
-                        callback_data="ad_0"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="🔙 Back",
-                        callback_data="settings_back"
-                    )
-                ]
-            ]
-        )
-    )
-
-
-@router.callback_query(
-    F.data.startswith("ad_")
-)
-async def set_autodelete(
-    callback: CallbackQuery
-):
-
-    if not is_admin(
-        callback.from_user.id
-    ):
-        return await callback.answer(
-            "⛔ Admin only.",
-            show_alert=True
-        )
-
-    minutes = int(
-        callback.data.split("_")[1]
-    )
-
-    await set_setting(
-        "auto_delete_minutes",
-        minutes
-    )
-
-    await callback.answer(
-        "✅ Auto delete updated!"
-    )
-
-    current = (
-        "OFF"
-        if minutes == 0
-        else f"{minutes} minutes"
-    )
-
-    await callback.message.edit_text(
-        "⏱ <b>Auto Delete Settings</b>\n\n"
-        f"Current: <b>{current}</b>",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="🔙 Back",
-                        callback_data="settings_back"
-                    )
-                ]
-            ]
-        )
-    )
-
-
-# =========================================================
-# FSUB SETTINGS
-# =========================================================
-
-def fsub_settings_keyboard():
-
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="➕ Add FSub",
-                    callback_data="fsub_add_info"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="➖ Remove FSub",
-                    callback_data="fsub_remove_info"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📋 Refresh List",
-                    callback_data="settings_fsub"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🔙 Back",
-                    callback_data="settings_back"
-                )
-            ]
-        ]
-    )
-
-
-@router.callback_query(
-    F.data == "settings_fsub"
-)
-async def settings_fsub(
-    callback: CallbackQuery
-):
-
-    if not is_admin(
-        callback.from_user.id
-    ):
-        return await callback.answer(
-            "⛔ Admin only.",
-            show_alert=True
-        )
-
-    fsubs = await get_fsub_channels()
-
-    text = (
-        "📢 <b>Force Subscription</b>\n\n"
-        f"Channels: <b>{len(fsubs)}/4</b>\n\n"
-    )
-
-    if fsubs:
-        for i, channel in enumerate(
-            fsubs,
-            start=1
-        ):
-
-            title = channel.get(
-                "title",
-                "Channel"
-            )
-
-            invite = channel.get(
-                "invite_link"
-            )
-
-            if invite:
-                text += (
-                    f'{i}. <a href="{invite}">'
-                    f"{title}</a>\n"
-                )
-            else:
-                text += (
-                    f"{i}. {title}\n"
-                )
-    else:
-        text += "No FSub channels added.\n"
-
-    text += (
-        "\nBot ko channel me admin banana zaroori hai."
-    )
-
-    await callback.answer()
-
-    await callback.message.edit_text(
-        text,
-        reply_markup=fsub_settings_keyboard()
-    )
-
-
-@router.callback_query(
-    F.data == "fsub_add_info"
-)
-async def fsub_add_info(
-    callback: CallbackQuery
-):
-
-    if not is_admin(
-        callback.from_user.id
-    ):
-        return await callback.answer(
-            "⛔ Admin only.",
-            show_alert=True
-        )
-
-    await callback.answer()
-
-    await callback.message.edit_text(
-        "➕ <b>Add FSub Channel</b>\n\n"
-        "Channel ID bhejo:\n\n"
-        "<code>/addfsub -1001234567890</code>\n\n"
-        "Maximum <b>4 channels</b>.",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="🔙 Back",
-                        callback_data="settings_fsub"
-                    )
-                ]
-            ]
-        )
-    )
-
-
-@router.callback_query(
-    F.data == "fsub_remove_info"
-)
-async def fsub_remove_info(
-    callback: CallbackQuery
-):
-
-    if not is_admin(
-        callback.from_user.id
-    ):
-        return await callback.answer(
-            "⛔ Admin only.",
-            show_alert=True
-        )
-
-    await callback.answer()
-
-    await callback.message.edit_text(
-        "➖ <b>Remove FSub Channel</b>\n\n"
-        "Channel ID bhejo:\n\n"
-        "<code>/delfsub -1001234567890</code>",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="🔙 Back",
-                        callback_data="settings_fsub"
-                    )
-                ]
-            ]
-        )
-    )
-
-
-# =========================================================
-# ADD FSUB
-# =========================================================
-
-@router.message(
-    Command("addfsub")
-)
-async def addfsub(
-    message: Message
-):
-
-    if not is_admin(
-        message.from_user.id
-    ):
-        return await message.answer(
-            "⛔ Admin only."
-        )
-
-    parts = (
-        message.text or ""
-    ).split()
-
-    if len(parts) != 2:
-        return await message.answer(
-            "Usage:\n"
-            "<code>/addfsub CHANNEL_ID</code>"
-        )
+    channel_id = context.args[0]
+    invite_link = context.args[1] if len(context.args) >= 2 else ""
 
     try:
-        channel_id = int(parts[1])
+        chat = await context.bot.get_chat(channel_id)
+        title = chat.title or chat.first_name or str(channel_id)
+        username = f"https://t.me/{chat.username}" if chat.username else ""
+        if not invite_link:
+            invite_link = username
+    except TelegramError as e:
+        log.warning("Could not get channel information: %s", e)
+        title = str(channel_id)
+
+    db.add_fsub(channel_id, invite_link, title)
+    await send_text(
+        update,
+        f"✅ <b>Force-sub channel added!</b>\n\n📢 Channel: <b>{title}</b>\n🆔 ID: <code>{channel_id}</code>\n\nMake sure the bot is an administrator in the channel.",
+        parse_mode="HTML",
+    )
+
+async def del_fsub_cmd(update, context):
+    if not is_admin(update.effective_user.id):
+        return
+    if len(context.args) != 1:
+        await send_text(update, "Usage: /del_fsub <channel_id>")
+        return
+    db.del_fsub(context.args[0])
+    await send_text(update, "✅ Force-sub channel removed.")
+
+async def fsub_chnl_cmd(update, context):
+    if not is_admin(update.effective_user.id):
+        return
+    channels = db.list_fsub()
+    if not channels:
+        await send_text(update, "📢 No force-sub channels configured.")
+        return
+
+    text = "📢 <b>Force-sub Channels</b>\n\n"
+    for channel in channels:
+        title = channel.get("title") or "Unknown Channel"
+        text += f"• 📢 <b>{title}</b>\n  ID: <code>{channel['channel_id']}</code>\n\n"
+    await send_text(update, text, parse_mode="HTML")
+
+async def add_banuser_cmd(update, context):
+    if not is_admin(update.effective_user.id):
+        return
+    if len(context.args) != 1:
+        await send_text(update, "Usage: /add_banuser <user_id>")
+        return
+    try:
+        user_id = int(context.args[0])
+        db.ban_user(user_id, update.effective_user.id)
+        await send_text(update, f"🚫 User {user_id} banned.")
     except ValueError:
-        return await message.answer(
-            "❌ Channel ID must be a number."
-        )
+        await send_text(update, "❌ User ID must be a number.")
 
-    if channel_id >= 0:
-        return await message.answer(
-            "❌ Use the full private channel ID.\n\n"
-            "Example:\n"
-            "<code>-1001234567890</code>"
-        )
-
-    fsubs = await get_fsub_channels()
-
-    if len(fsubs) >= 4:
-        return await message.answer(
-            "❌ Maximum 4 FSub channels allowed."
-        )
-
-    for channel in fsubs:
-        if str(channel.get("chat_id")) == str(channel_id):
-            return await message.answer(
-                "❌ This channel is already added."
-            )
-
+async def del_banuser_cmd(update, context):
+    if not is_admin(update.effective_user.id):
+        return
+    if len(context.args) != 1:
+        await send_text(update, "Usage: /del_banuser <user_id>")
+        return
     try:
-        chat = await bot.get_chat(
-            channel_id
-        )
-    except Exception:
-        return await message.answer(
-            "❌ I can't access this channel.\n\n"
-            "Make sure the bot is admin in the channel."
-        )
-
-    try:
-        bot_me = await bot.get_me()
-
-        member = await bot.get_chat_member(
-            chat_id=channel_id,
-            user_id=bot_me.id
-        )
-
-        status_raw = getattr(
-            member,
-            "status",
-            None
-        )
-
-        status = getattr(
-            status_raw,
-            "value",
-            str(status_raw)
-        )
-
-        if str(status).lower() not in (
-            "administrator",
-            "creator"
-        ):
-            return await message.answer(
-                "❌ Bot is not admin in this channel."
-            )
-
-    except Exception:
-        return await message.answer(
-            "❌ Couldn't verify bot admin status."
-        )
-
-    invite_link = None
-
-    try:
-        invite = await bot.create_chat_invite_link(
-            chat_id=channel_id
-        )
-
-        invite_link = invite.invite_link
-
-    except Exception:
-
-        if chat.username:
-            invite_link = (
-                f"https://t.me/{chat.username}"
-            )
-
-    if not invite_link:
-        return await message.answer(
-            "❌ Couldn't create an invite link."
-        )
-
-    fsubs.append({
-        "chat_id": channel_id,
-        "title": chat.title or "Channel",
-        "username": chat.username,
-        "invite_link": invite_link
-    })
-
-    await save_fsub_channels(
-        fsubs
-    )
-
-    await message.answer(
-        "✅ <b>FSub channel added!</b>\n\n"
-        f"📢 {escape_html(chat.title or 'Channel')}\n"
-        f"🆔 <code>{channel_id}</code>"
-    )
-
-
-# =========================================================
-# DELETE FSUB
-# =========================================================
-
-@router.message(
-    Command("delfsub")
-)
-async def delfsub(
-    message: Message
-):
-
-    if not is_admin(
-        message.from_user.id
-    ):
-        return await message.answer(
-            "⛔ Admin only."
-        )
-
-    parts = (
-        message.text or ""
-    ).split()
-
-    if len(parts) != 2:
-        return await message.answer(
-            "Usage:\n"
-            "<code>/delfsub CHANNEL_ID</code>"
-        )
-
-    try:
-        channel_id = int(parts[1])
+        db.unban_user(int(context.args[0]))
+        await send_text(update, "✅ User unbanned.")
     except ValueError:
-        return await message.answer(
-            "❌ Invalid channel ID."
+        await send_text(update, "❌ Invalid user ID.")
+
+async def banuser_list_cmd(update, context):
+    if not is_admin(update.effective_user.id):
+        return
+    rows = db.list_banned()
+    if not rows:
+        await send_text(update, "🚫 No banned users.")
+        return
+    text = "🚫 <b>Banned Users</b>\n\n"
+    for row in rows:
+        text += f"• {row['user_id']}\n"
+    await send_text(update, text, parse_mode="HTML")
+
+async def add_admins_cmd(update, context):
+    if not is_owner(update.effective_user.id):
+        return
+    if len(context.args) != 1:
+        await send_text(update, "Usage: /add_admins <user_id>")
+        return
+    try:
+        db.add_admin(int(context.args[0]))
+        await send_text(update, "✅ Admin added.")
+    except ValueError:
+        await send_text(update, "❌ Invalid user ID.")
+
+async def del_admins_cmd(update, context):
+    if not is_owner(update.effective_user.id):
+        return
+    if len(context.args) != 1:
+        await send_text(update, "Usage: /del_admins <user_id>")
+        return
+    try:
+        db.remove_admin(int(context.args[0]))
+        await send_text(update, "✅ Admin removed.")
+    except ValueError:
+        await send_text(update, "❌ Invalid user ID.")
+
+async def admin_list_cmd(update, context):
+    if not is_owner(update.effective_user.id):
+        return
+    admins = db.list_admins()
+    text = f"👑 Owner: <code>{OWNER_ID}</code>\n\n"
+    text += "\n".join(f"• <code>{uid}</code>" for uid in admins) if admins else "• No secondary admins"
+    await send_text(update, text, parse_mode="HTML")
+
+async def auto_del_cmd(update, context):
+    if not is_admin(update.effective_user.id):
+        return
+    current = get_delete_seconds()
+    if not context.args:
+        await send_text(update, f"⏳ Current auto-delete: {current} seconds\n\nUsage:\n/auto_del <seconds>\n\nExample:\n/auto_del 600")
+        return
+    try:
+        seconds = int(context.args[0])
+        if seconds < 0:
+            raise ValueError
+    except ValueError:
+        await send_text(update, "❌ Seconds must be a valid number.")
+        return
+    db.set_setting("delete_seconds", str(seconds))
+    await send_text(update, f"✅ Auto-delete saved: {seconds} seconds.\n\nThis setting is stored in Supabase.")
+
+async def request_cmd(update, context):
+    request_text = " ".join(context.args).strip()
+    if not request_text:
+        await send_text(update, "Usage: /request <movie or series name>")
+        return
+
+    request_id = db.add_request(update.effective_user.id, request_text)
+    await send_text(update, f"✅ <b>Request submitted!</b>\n\n🆔 Request ID: {request_id}", parse_mode="HTML")
+
+    try:
+        await context.bot.send_message(
+            OWNER_ID,
+            f"📩 <b>New Request #{request_id}</b>\n\n👤 User: {update.effective_user.id}\n🎬 Request: {request_text}",
+            parse_mode="HTML",
         )
-
-    fsubs = await get_fsub_channels()
-
-    new_list = [
-        channel
-        for channel in fsubs
-        if str(channel.get("chat_id"))
-        != str(channel_id)
-    ]
-
-    if len(new_list) == len(fsubs):
-        return await message.answer(
-            "❌ This channel is not in FSub."
-        )
-
-    await save_fsub_channels(
-        new_list
-    )
-
-    await message.answer(
-        "✅ FSub channel removed."
-    )
-
-
-# =========================================================
-# SETTINGS ADMINS
-# =========================================================
-
-@router.callback_query(
-    F.data == "settings_admins"
-)
-async def settings_admins(
-    callback: CallbackQuery
-):
-
-    if not is_admin(
-        callback.from_user.id
-    ):
-        return await callback.answer(
-            "⛔ Admin only.",
-            show_alert=True
-        )
-
-    admin_list = db.list_admins()
-
-    text = (
-        "👑 <b>Owner</b>\n"
-        f"🆔 <code>{OWNER_ID}</code>\n\n"
-        "🛡 <b>Admins</b>\n"
-    )
-
-    if admin_list:
-
-        for uid in admin_list:
-
-            name = await telegram_user_name(uid)
-
-            text += (
-                f"• {profile_link(uid, name)}\n"
-                f"  🆔 <code>{uid}</code>\n"
-            )
-
-    else:
-        text += "• None"
-
-    await callback.answer()
-
-    await callback.message.edit_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="🔙 Back",
-                        callback_data="settings_back"
-                    )
-                ]
-            ]
-        )
-    )
-
-
-# =========================================================
-# SETTINGS MODS
-# =========================================================
-
-@router.callback_query(
-    F.data == "settings_mods"
-)
-async def settings_mods(
-    callback: CallbackQuery
-):
-
-    if not is_admin(
-        callback.from_user.id
-    ):
-        return await callback.answer(
-            "⛔ Admin only.",
-            show_alert=True
-        )
-
-    await callback.answer()
-
-    await callback.message.edit_text(
-        "🛡 <b>Moderators</b>\n\n"
-        "Moderator management is available "
-        "through the admin controls.",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="🔙 Back",
-                        callback_data="settings_back"
-                    )
-                ]
-            ]
-        )
-    )
-
-
-# =========================================================
-# SETTINGS BACK
-# =========================================================
-
-@router.callback_query(
-    F.data == "settings_back"
-)
-async def settings_back(
-    callback: CallbackQuery
-):
-
-    if not is_admin(
-        callback.from_user.id
-    ):
-        return await callback.answer(
-            "⛔ Admin only.",
-            show_alert=True
-        )
-
-    await callback.answer()
-
-    await callback.message.edit_text(
-        "⚙️ <b>Settings</b>\n\n"
-        "<i>Please choose an option below.</i>",
-        reply_markup=settings_keyboard()
-    )
-
-
-# =========================================================
-# HELP
-# =========================================================
-
-def help_keyboard():
-
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="📥 File Links",
-                    callback_data="help_files"
-                ),
-                InlineKeyboardButton(
-                    text="👑 My Plan",
-                    callback_data="help_plan"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="ℹ️ About",
-                    callback_data="about"
-                ),
-                InlineKeyboardButton(
-                    text="❌ Close",
-                    callback_data="close"
-                )
-            ]
-        ]
-    )
-
-
-@router.message(
-    Command("help")
-)
-async def help_command(
-    message: Message
-):
-
-    ensure_user_from_message(message)
-
-    await message.answer(
-        "❓ <b>How can I help you?</b>\n\n"
-        "<i>Choose an option below.</i>",
-        reply_markup=help_keyboard()
-    )
-
-
-@router.callback_query(
-    F.data == "help_files"
-)
-async def help_files(
-    callback: CallbackQuery
-):
-
-    await callback.answer()
-
-    await callback.message.edit_text(
-        "📥 <b>File Links</b>\n\n"
-        "Send the file link generated by the bot "
-        "to get your requested file.",
-        reply_markup=help_keyboard()
-    )
-
-
-@router.callback_query(
-    F.data == "help_plan"
-)
-async def help_plan(
-    callback: CallbackQuery
-):
-
-    await callback.answer()
-
-    user_id = callback.from_user.id
-
-    premium = db.get_premium(user_id)
-
-    name = (
-        callback.from_user.first_name
-        or callback.from_user.username
-        or "User"
-    )
-
-    if premium:
-
-        remaining = format_remaining(
-            premium["expires_at"]
-        )
-
-        text = (
-            "👑 <b>YOUR PREMIUM MEMBERSHIP STATUS</b>\n\n"
-            f"👤 Name: {escape_html(name)}\n"
-            f"🆔 User ID: <code>{user_id}</code>\n"
-            "💎 Plan Status: <b>Active</b>\n"
-            f"⏳ Time Remaining: <b>{remaining}</b>"
-        )
-
-    else:
-
-        text = (
-            "👑 <b>YOUR PREMIUM MEMBERSHIP STATUS</b>\n\n"
-            f"👤 Name: {escape_html(name)}\n"
-            f"🆔 User ID: <code>{user_id}</code>\n"
-            "💎 Plan Status: <b>Inactive</b>\n"
-            "⏳ Time Remaining: <b>0 Days, 0 Hours</b>"
-        )
-
-    await callback.message.edit_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="🔙 Back",
-                        callback_data="help_back"
-                    )
-                ]
-            ]
-        )
-    )
-
-
-@router.callback_query(
-    F.data == "help_back"
-)
-async def help_back(
-    callback: CallbackQuery
-):
-
-    await callback.answer()
-
-    await callback.message.edit_text(
-        "❓ <b>How can I help you?</b>\n\n"
-        "<i>Choose an option below.</i>",
-        reply_markup=help_keyboard()
-    )
-
-
-# =========================================================
-# BROADCAST
-# =========================================================
-
-@router.message(
-    Command("broadcast")
-)
-async def broadcast(
-    message: Message
-):
-
-    ensure_user_from_message(message)
-
-    if not is_mod(
-        message.from_user.id
-    ):
-        return await message.answer(
-            "⛔ Moderator/Admin only."
-        )
-
-    if not message.reply_to_message:
-        return await message.answer(
-            "Reply to the message you want to "
-            "broadcast, then use /broadcast."
-        )
-
-    users_list = db.list_users()
-
-    sent = 0
-    failed = 0
-
-    delete_minutes = int(
-        await get_setting(
-            "auto_delete_minutes",
-            5
-        )
-    )
-
-    for uid in users_list:
-
-        if db.is_banned(uid):
-            continue
-
+    except TelegramError:
+        pass
+
+async def broadcast_cmd(update, context):
+    if not is_admin(update.effective_user.id):
+        return
+    text = " ".join(context.args).strip()
+    if not text:
+        await send_text(update, "Usage: /broadcast <message>")
+        return
+
+    users = db.list_users()
+    success = failed = 0
+    for user_id in users:
         try:
-
-            copied = await bot.copy_message(
-                chat_id=uid,
-                from_chat_id=message.chat.id,
-                message_id=message.reply_to_message.message_id
-            )
-
-            sent += 1
-
-            if delete_minutes > 0:
-                schedule_delete(
-                    uid,
-                    copied.message_id,
-                    delete_minutes * 60
-                )
-
-            await asyncio.sleep(
-                0.035
-            )
-
-        except Exception as e:
-
+            await context.bot.send_message(user_id, text)
+            success += 1
+        except TelegramError:
             failed += 1
+        await asyncio.sleep(0.05)
 
-            log.warning(
-                "Broadcast failed to %s: %s",
-                uid,
-                e
-            )
+    await send_text(update, f"📣 <b>Broadcast Complete</b>\n\n✅ Sent: {success}\n❌ Failed: {failed}", parse_mode="HTML")
 
-    await message.answer(
-        "📢 <b>Broadcast complete</b>\n\n"
-        f"✅ Sent: {sent}\n"
-        f"❌ Failed: {failed}"
+async def pbroadcast_cmd(update, context):
+    if not is_admin(update.effective_user.id):
+        return
+    text = " ".join(context.args).strip()
+    if not text:
+        await send_text(update, "Usage: /pbroadcast <message>")
+        return
+
+    users = db.list_users()
+    success = failed = 0
+    for user_id in users:
+        try:
+            msg = await context.bot.send_message(user_id, text)
+            try:
+                await context.bot.pin_chat_message(user_id, msg.message_id, disable_notification=True)
+            except TelegramError:
+                pass
+            success += 1
+        except TelegramError:
+            failed += 1
+        await asyncio.sleep(0.05)
+
+    await send_text(update, f"📌 <b>Broadcast Complete</b>\n\n✅ Sent: {success}\n❌ Failed: {failed}", parse_mode="HTML")
+
+async def users_cmd(update, context):
+    if not is_owner(update.effective_user.id):
+        return
+    await send_text(update, f"👥 Total users: {db.user_count()}")
+
+async def cancel_cmd(update, context):
+    context.user_data.clear()
+    await send_text(update, "✅ All active setup state has been reset.")
+
+async def addsub_cmd(update, context):
+    await add_premium_cmd(update, context)
+
+async def remsub_cmd(update, context):
+    await remove_premium_cmd(update, context)
+
+async def addadmin_cmd(update, context):
+    await add_admins_cmd(update, context)
+
+async def removeadmin_cmd(update, context):
+    await del_admins_cmd(update, context)
+
+async def admins_cmd(update, context):
+    await admin_list_cmd(update, context)
+
+async def stats_cmd(update, context):
+    if not is_admin(update.effective_user.id):
+        return
+    stats = db.stats()
+    await send_text(
+        update,
+        f"📊 <b>Statistics</b>\n\n📁 Files: {stats['files']}\n📦 Batches: {stats['batches']}\n👑 Admins: {stats['admins']}\n💎 Premium: {stats['premium']}\n👥 Users: {stats['users']}\n🚫 Banned: {stats['banned']}",
+        parse_mode="HTML",
     )
 
+def main():
+    threading.Thread(target=start_health_server, daemon=True).start()
 
-# =========================================================
-# REQUEST
-# =========================================================
+    app = Application.builder().token(BOT_TOKEN).build()
 
-@router.message(
-    Command("request")
-)
-async def request_command(
-    message: Message
-):
+    handlers = {
+        "start": start,
+        "id": id_cmd,
+        "help": help_cmd,
+        "save": save_cmd,
+        "get": get_cmd,
+        "verify": verify_cmd,
+        "batch": batch_cmd,
+        "genlink": genlink_cmd,
+        "my_plan": my_plan_cmd,
+        "request": request_cmd,
+        "auto_del": auto_del_cmd,
+        "fsub_chnl": fsub_chnl_cmd,
+        "add_fsub": add_fsub_cmd,
+        "del_fsub": del_fsub_cmd,
+        "add_banuser": add_banuser_cmd,
+        "del_banuser": del_banuser_cmd,
+        "banuser_list": banuser_list_cmd,
+        "add_premium": add_premium_cmd,
+        "remove_premium": remove_premium_cmd,
+        "list_premium": list_premium_cmd,
+        "add_admins": add_admins_cmd,
+        "del_admins": del_admins_cmd,
+        "admin_list": admin_list_cmd,
+        "broadcast": broadcast_cmd,
+        "pbroadcast": pbroadcast_cmd,
+        "cancel": cancel_cmd,
+        "users": users_cmd,
+        "addsub": addsub_cmd,
+        "remsub": remsub_cmd,
+        "addadmin": addadmin_cmd,
+        "removeadmin": removeadmin_cmd,
+        "admins": admins_cmd,
+        "stats": stats_cmd,
+    }
 
-    ensure_user_from_message(message)
+    for command, function in handlers.items():
+        app.add_handler(CommandHandler(command, function))
 
-    parts = (
-        message.text or ""
-    ).split(
-        maxsplit=1
-    )
+    app.add_handler(CallbackQueryHandler(fsub_callback, pattern="^check_fsub$"))
 
-    if len(parts) != 2:
-        return await message.answer(
-            "Usage:\n"
-            "<code>/request your request</code>"
-        )
-
-    request_id = db.add_request(
-        message.from_user.id,
-        parts[1]
-    )
-
-    await message.answer(
-        "✅ <b>Request submitted.</b>\n\n"
-        f"🆔 Request ID: <code>{request_id}</code>"
-    )
-
-
-# =========================================================
-# STATS
-# =========================================================
-
-@router.message(
-    Command("stats")
-)
-async def stats(
-    message: Message
-):
-
-    if not is_admin(
-        message.from_user.id
-    ):
-        return await message.answer(
-            "⛔ Admin only."
-        )
-
-    data = db.stats()
-
-    await message.answer(
-        "📊 <b>Bot Statistics</b>\n\n"
-        f"👥 Users: <b>{data['users']}</b>\n"
-        f"📁 Files: <b>{data['files']}</b>\n"
-        f"📦 Batches: <b>{data['batches']}</b>\n"
-        f"👑 Premium: <b>{data['premium']}</b>\n"
-        f"🛡 Admins: <b>{data['admins']}</b>\n"
-        f"🚫 Banned: <b>{data['banned']}</b>"
-    )
-
-
-# =========================================================
-# CLONE
-# =========================================================
-
-@router.message(
-    Command("clone")
-)
-async def clone_info(
-    message: Message
-):
-
-    if not is_owner(
-        message.from_user.id
-    ):
-        return await message.answer(
-            "⛔ Owner only."
-        )
-
-    await message.answer(
-        "🔁 <b>Clone System</b>\n\n"
-        "All clones can use the same Supabase database.\n\n"
-        "<b>Clone-specific:</b>\n"
-        "• Start Image\n"
-        "• Force Subscribe Channels\n\n"
-        "<b>Shared:</b>\n"
-        "• Users\n"
-        "• Admins\n"
-        "• Premium\n"
-        "• Files\n"
-        "• Batches\n"
-        "• Auto Delete\n"
-        "• Broadcast data"
-    )
-
-
-# =========================================================
-# ERROR HANDLER
-# =========================================================
-
-@router.errors()
-async def error_handler(
-    event
-):
-
-    log.exception(
-        "Telegram handler error: %s",
-        event.exception
-    )
-
-
-# =========================================================
-# STARTUP
-# =========================================================
-
-async def main():
-
-    global BOT_USERNAME
-
-    try:
-
-        me = await bot.get_me()
-
-        BOT_USERNAME = (
-            me.username
-            or BOT_USERNAME
-        )
-
-        log.info(
-            "Bot started as @%s",
-            BOT_USERNAME
-        )
-
-    except Exception as e:
-
-        log.warning(
-            "Could not get bot info: %s",
-            e
-        )
-
-    await bot.delete_webhook(
-        drop_pending_updates=False
-    )
-
-    config = uvicorn.Config(
-        app,
-        host="0.0.0.0",
-        port=PORT,
-        log_level="info"
-    )
-
-    server = uvicorn.Server(
-        config
-    )
-
-    await asyncio.gather(
-        dp.start_polling(bot),
-        server.serve()
-    )
-
-
-# =========================================================
-# RUN
-# =========================================================
+    log.info("🔥 Bot starting on Render...")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

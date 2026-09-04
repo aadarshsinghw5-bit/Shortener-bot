@@ -1,6 +1,4 @@
-python-telegram-bot>=22.0
-requests>=2.31.0
-psycopg2-binary>=2.9.9
-python-telegram-bot
-requests
-supabase
+aiogram>=3.24.0
+supabase>=2.31.0
+fastapi>=0.115.0
+uvicorn>=0.30.0

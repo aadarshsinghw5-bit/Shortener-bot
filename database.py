@@ -84,8 +84,6 @@ class Database:
             "expires_at": expires.isoformat(),
         }).execute()
 
-        # The expiry itself is used as the reminder key. This means
-        # re-activating/extending premium automatically creates a new reminder.
         self.set_setting(f"premium_reminder_{user_id}", "")
         return expires
 
@@ -144,10 +142,6 @@ class Database:
 
         return sorted(active, key=lambda x: x.get("expires_at", ""))
 
-    # =========================
-    # PREMIUM REMINDER STATE
-    # =========================
-
     def get_premium_reminder(self, user_id):
         return self.get_setting(f"premium_reminder_{int(user_id)}", "")
 
@@ -178,7 +172,9 @@ class Database:
         }).execute()
 
     def unban_user(self, user_id):
-        self.db.table("banned_users").delete().eq("user_id", int(user_id)).execute()
+        self.db.table("banned_users").delete().eq(
+            "user_id", int(user_id)
+        ).execute()
 
     def is_banned(self, user_id):
         r = self.db.table("banned_users").select("user_id").eq(
@@ -209,6 +205,24 @@ class Database:
             "file_id", file_id
         ).limit(1).execute()
         return r.data[0] if r.data else None
+
+    def get_file_by_message(self, channel_id, message_id):
+        r = self.db.table("files").select("*").eq(
+            "channel_id", int(channel_id)
+        ).eq(
+            "message_id", int(message_id)
+        ).limit(1).execute()
+        return r.data[0] if r.data else None
+
+    def get_files_between(self, channel_id, first_message_id, last_message_id):
+        r = self.db.table("files").select("*").eq(
+            "channel_id", int(channel_id)
+        ).gte(
+            "message_id", int(first_message_id)
+        ).lte(
+            "message_id", int(last_message_id)
+        ).order("message_id").execute()
+        return r.data or []
 
     # =========================
     # BATCHES
@@ -255,7 +269,9 @@ class Database:
         return token
 
     def consume_token(self, token):
-        r = self.db.table("tokens").select("*").eq("token", token).limit(1).execute()
+        r = self.db.table("tokens").select("*").eq(
+            "token", token
+        ).limit(1).execute()
         if not r.data:
             return None
 
@@ -264,13 +280,17 @@ class Database:
             return None
 
         try:
-            expiry = datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00"))
+            expiry = datetime.fromisoformat(
+                row["expires_at"].replace("Z", "+00:00")
+            )
             if expiry <= datetime.now(timezone.utc):
                 return None
         except Exception:
             return None
 
-        self.db.table("tokens").update({"used": True}).eq("token", token).execute()
+        self.db.table("tokens").update({"used": True}).eq(
+            "token", token
+        ).execute()
         return row["user_id"], row["target"]
 
     # =========================

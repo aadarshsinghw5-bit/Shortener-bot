@@ -1,788 +1,736 @@
 import os
-import asyncio
+import re
 import logging
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import quote
+from datetime import datetime, timezone
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-from telegram.error import TelegramError
+import aiohttp
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
+from telegram.constants import ChatMemberStatus
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+)
 
 from database import Database
-from shortener import Shortener
 
 logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
-log = logging.getLogger(__name__)
+log = logging.getLogger("file-store-bot")
+
+# ============================================================
+# ENV
+# ============================================================
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-OWNER_ID = int(os.environ["OWNER_ID"])
-DB_CHANNEL_ID = int(os.environ["DB_CHANNEL_ID"])
-BOT_USERNAME = os.environ["BOT_USERNAME"].lstrip("@")
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "").lstrip("@")
+START_IMAGE = os.environ.get("START_IMAGE", "").strip()
+SHORTENER_IMAGE = os.environ.get("SHORTENER_IMAGE", "").strip()
+
+# Your AroLinks token. NEVER put the real token in GitHub.
+AROLINKS_TOKEN = os.environ.get("AROLINKS_TOKEN", "").strip()
+
+# AroLinks API endpoint. Keep configurable because API endpoints can change.
+# Example:
+#   https://arolinks.com/api
+# or the exact endpoint shown in your AroLinks dashboard.
+AROLINKS_API_URL = os.environ.get("AROLINKS_API_URL", "").strip()
+AROLINKS_QUICK_LINK = os.environ.get("AROLINKS_QUICK_LINK", "").strip()
+
+# If your AroLinks dashboard requires a fixed API parameter name,
+# these can be changed without touching the rest of the bot.
+AROLINKS_TOKEN_PARAM = os.environ.get("AROLINKS_TOKEN_PARAM", "api")
+AROLINKS_URL_PARAM = os.environ.get("AROLINKS_URL_PARAM", "url")
+
+# Public links used by the buttons.
+TUTORIAL_URL = os.environ.get("TUTORIAL_URL", "https://t.me/").strip()
+PREMIUM_URL = os.environ.get("PREMIUM_URL", "https://t.me/").strip()
+
+# This is the text shown on the /start home screen.
+# Change only these strings if you want different wording.
+HOME_TEXT = """⚡ HEY, {name} ~
+
+I AM FILE STORE BOT, I CAN STORE PRIVATE
+FILES IN SPECIFIED CHANNEL AND OTHER USERS
+CAN ACCESS IT FROM SPECIAL LINK."""
+
+ABOUT_TEXT = """ℹ️ ABOUT
+
+This bot creates special links for files/messages.
+
+• Single message: reply to any message and use /genlink
+• Batch: use /batch with the first and last DB file links
+• Premium users still have to join all required channels
+• Premium users get direct access without the shortener
+
+Use the buttons below to continue."""
+
+# ============================================================
+# DATABASE
+# ============================================================
 
 db = Database()
 
-shortener = Shortener(
-    os.getenv("SHORTENER_API_URL", "https://arolinks.com/api"),
-    os.getenv("SHORTENER_API_KEY", ""),
-    BOT_USERNAME,
-    db,
-)
 
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(b"Bot is running!")
+# ============================================================
+# HELPERS
+# ============================================================
 
-    def log_message(self, fmt, *args):
-        return
+def home_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("↗ • ANIME HUB", url=os.environ.get("ANIME_HUB_URL", "https://t.me/")),
+            InlineKeyboardButton("ABOUT •", callback_data="about"),
+        ],
+        [
+            InlineKeyboardButton("• CLOSE •", callback_data="close"),
+        ],
+    ])
 
-def start_health_server():
+
+def download_keyboard(short_url: str):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Click to download your file", url=short_url)],
+        [
+            InlineKeyboardButton("How to Open", url=TUTORIAL_URL),
+            InlineKeyboardButton("Premium", url=PREMIUM_URL),
+        ],
+    ])
+
+
+def fsub_keyboard(channels):
+    rows = []
+    for ch in channels:
+        title = ch.get("title") or ch.get("channel_id", "Channel")
+        link = ch.get("invite_link") or ""
+        if link:
+            rows.append([InlineKeyboardButton(f"• {title} •", url=link)])
+    rows.append([InlineKeyboardButton("♻️ Try Again", callback_data="check_fsub")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def is_joined(bot, user_id: int, channel_id: str) -> bool:
     try:
-        port = int(os.environ.get("PORT", "10000"))
-        server = HTTPServer(("0.0.0.0", port), HealthHandler)
-        log.info("Health server running on port %s", port)
-        server.serve_forever()
-    except Exception:
-        log.exception("Health server error")
+        member = await bot.get_chat_member(chat_id=int(channel_id), user_id=user_id)
+        return member.status in {
+            ChatMemberStatus.MEMBER,
+            ChatMemberStatus.ADMINISTRATOR,
+            ChatMemberStatus.OWNER,
+        }
+    except Exception as exc:
+        log.warning("FSUB check failed for %s / %s: %s", channel_id, user_id, exc)
+        return False
 
-def is_owner(user_id):
-    return user_id == OWNER_ID
 
-def is_admin(user_id):
-    return user_id == OWNER_ID or db.is_admin(user_id)
-
-def bot_link(target):
-    return f"https://t.me/{BOT_USERNAME}?start={target}"
-
-async def send_text(update, text, **kwargs):
-    message = update.effective_message
-    if message:
-        return await message.reply_text(text, **kwargs)
-
-async def delete_later(context, chat_id, message_ids, seconds):
-    await asyncio.sleep(seconds)
-    if not isinstance(message_ids, list):
-        message_ids = [message_ids]
-    for message_id in message_ids:
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-        except TelegramError:
-            pass
-
-def get_delete_seconds():
-    try:
-        return db.get_delete_seconds()
-    except Exception:
-        return 600
-
-async def copy_stored_message(context, chat_id, row):
-    return await context.bot.copy_message(
-        chat_id=chat_id,
-        from_chat_id=row["channel_id"],
-        message_id=row["message_id"],
-    )
-
-async def send_file(context, chat_id, row):
-    seconds = get_delete_seconds()
-    file_msg = await copy_stored_message(context, chat_id, row)
-    minutes = max(1, seconds // 60)
-    warning = await context.bot.send_message(
-        chat_id=chat_id,
-        text=f"⏳ This file will be automatically deleted in {minutes} minutes."
-    )
-    asyncio.create_task(delete_later(
-        context, chat_id, [file_msg.message_id, warning.message_id], seconds
-    ))
-
-async def send_batch(context, chat_id, items):
-    seconds = get_delete_seconds()
-    message_ids = []
-    for row in items:
-        try:
-            msg = await copy_stored_message(context, chat_id, row)
-            message_ids.append(msg.message_id)
-        except TelegramError:
-            log.exception("Batch delivery failed")
-
-    if not message_ids:
-        await context.bot.send_message(chat_id=chat_id, text="❌ Could not deliver the batch.")
-        return
-
-    minutes = max(1, seconds // 60)
-    warning = await context.bot.send_message(
-        chat_id=chat_id,
-        text=f"⏳ These {len(message_ids)} files will be automatically deleted in {minutes} minutes."
-    )
-    message_ids.append(warning.message_id)
-    asyncio.create_task(delete_later(context, chat_id, message_ids, seconds))
-
-async def check_fsub(update, context):
+async def check_all_fsub(bot, user_id: int):
     channels = db.list_fsub()
-    if not channels:
-        return True
-
-    user_id = update.effective_user.id
     missing = []
+    for ch in channels:
+        if not await is_joined(bot, user_id, str(ch["channel_id"])):
+            missing.append(ch)
+    return missing
 
-    for channel in channels:
-        try:
-            member = await context.bot.get_chat_member(channel["channel_id"], user_id)
-            if member.status in ("left", "kicked"):
-                missing.append(channel)
-        except TelegramError as e:
-            log.warning("FSUB check failed for %s: %s", channel["channel_id"], e)
+
+async def require_fsub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    user = update.effective_user
+    missing = await check_all_fsub(context.bot, user.id)
 
     if not missing:
         return True
 
-    buttons = []
-    for channel in missing:
-        link = channel.get("invite_link") or channel.get("username")
-        title = channel.get("title") or "Join Channel"
-        if link:
-            buttons.append([InlineKeyboardButton(f"📢 {title}", url=link)])
-
-    buttons.append([InlineKeyboardButton("✅ Check Subscription", callback_data="check_fsub")])
-
-    await send_text(
-        update,
-        "🔒 <b>Join Required Channel(s)</b>\n\nPlease join all required channels and then press <b>Check Subscription</b>.",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
+    text = "🔒 Please join all required channels first.\n\nThen tap **Try Again**."
+    if update.callback_query:
+        try:
+            await update.callback_query.answer()
+            await update.callback_query.edit_message_text(
+                text,
+                reply_markup=fsub_keyboard(missing),
+                parse_mode="Markdown",
+            )
+        except Exception:
+            await update.callback_query.message.reply_text(
+                text,
+                reply_markup=fsub_keyboard(missing),
+                parse_mode="Markdown",
+            )
+    else:
+        await update.effective_message.reply_text(
+            text,
+            reply_markup=fsub_keyboard(missing),
+            parse_mode="Markdown",
+        )
     return False
 
-async def fsub_callback(update, context):
-    query = update.callback_query
-    await query.answer()
-    try:
-        await query.message.delete()
-    except TelegramError:
-        pass
 
-    if not await check_fsub(update, context):
+def make_bot_deeplink(token: str) -> str:
+    if not BOT_USERNAME:
+        raise RuntimeError("BOT_USERNAME is missing")
+    return f"https://t.me/{BOT_USERNAME}?start={token}"
+
+
+async def shorten_url(long_url: str) -> str:
+    """
+    Shorten using either:
+      1) AroLinks Quick/Easy Link (recommended), or
+      2) a configured AroLinks API endpoint.
+
+    Quick link normally looks like:
+      https://.../?api=TOKEN&url=
+
+    Put the complete Quick Link template in AROLINKS_QUICK_LINK,
+    including the final `url=`. The destination URL is URL-encoded.
+    """
+    if AROLINKS_QUICK_LINK:
+        from urllib.parse import quote
+        separator = "" if AROLINKS_QUICK_LINK.endswith(("=", "&", "?")) else "&url="
+        if "url=" in AROLINKS_QUICK_LINK:
+            return AROLINKS_QUICK_LINK + quote(long_url, safe="")
+        return AROLINKS_QUICK_LINK + separator + quote(long_url, safe="")
+
+    if not AROLINKS_TOKEN:
+        raise RuntimeError("AROLINKS_TOKEN is missing")
+    if not AROLINKS_API_URL:
+        raise RuntimeError("AROLINKS_API_URL is missing")
+
+    params = {
+        AROLINKS_TOKEN_PARAM: AROLINKS_TOKEN,
+        AROLINKS_URL_PARAM: long_url,
+    }
+
+    timeout = aiohttp.ClientTimeout(total=20)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(AROLINKS_API_URL, params=params) as resp:
+            raw = await resp.text()
+
+            if resp.status != 200:
+                raise RuntimeError(f"AroLinks HTTP {resp.status}: {raw[:300]}")
+
+            try:
+                data = await resp.json(content_type=None)
+            except Exception:
+                data = None
+
+            if isinstance(data, dict):
+                for key in (
+                    "shortenedUrl",
+                    "shortened_url",
+                    "short_url",
+                    "short",
+                    "url",
+                    "link",
+                ):
+                    value = data.get(key)
+                    if isinstance(value, str) and value.startswith(("http://", "https://")):
+                        return value
+
+                for parent in ("data", "result"):
+                    child = data.get(parent)
+                    if isinstance(child, dict):
+                        for key in ("shortenedUrl", "shortened_url", "short_url", "short", "url", "link"):
+                            value = child.get(key)
+                            if isinstance(value, str) and value.startswith(("http://", "https://")):
+                                return value
+
+            text = raw.strip().strip('"')
+            match = re.search(r"https?://\S+", text)
+            if match:
+                return match.group(0).rstrip('"\'')
+    raise RuntimeError("Could not find a short URL in the AroLinks response.")
+
+
+async def send_file_from_target(update: Update, context: ContextTypes.DEFAULT_TYPE, target: str):
+    """
+    target formats:
+      single:<source_chat_id>:<source_message_id>
+      file:<file_id>
+      batch:<batch_id>
+    """
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+
+    if target.startswith("single:"):
+        _, source_chat_id, source_message_id = target.split(":", 2)
+        sent = await context.bot.copy_message(
+            chat_id=chat_id,
+            from_chat_id=int(source_chat_id),
+            message_id=int(source_message_id),
+        )
+        await schedule_delete(context, chat_id, sent.message_id)
         return
 
-    await query.message.chat.send_message(
-        "✅ Subscription verified.\n\nNow open your file link again."
-    )
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_id = user.id
-
-    try:
-        db.add_user(user_id, user.username or "", user.first_name or "")
-    except Exception:
-        log.exception("Could not save user")
-
-    try:
-        if db.is_banned(user_id):
-            await send_text(update, "🚫 You are blocked from using this bot.")
+    if target.startswith("file:"):
+        file_id = target.split(":", 1)[1]
+        row = db.get_file(file_id)
+        if not row:
+            await context.bot.send_message(chat_id, "❌ File link is invalid or expired.")
             return
-    except Exception:
-        pass
 
-    arg = context.args[0] if context.args else ""
-
-    if arg.startswith("verify_"):
-        await verify_token(update, context, arg[7:])
-        return
-
-    if not await check_fsub(update, context):
-        return
-
-    if arg.startswith("file_"):
-        await deliver_file(update, context, arg[5:])
-        return
-
-    if arg.startswith("batch_"):
-        await deliver_batch(update, context, arg[6:])
-        return
-
-    await update.message.reply_photo(
-        photo="AgACAgUAAxkBAAIBn2qYRu_se2kINHefqBDGHTiw9ibyAAIiE2sbavbBVKy00PfhiLg9AQADAgADeAADPQQ",
-        caption=(
-            f"⚡ <b>HEY, {update.effective_user.first_name} ~</b>\n\n"
-            "I AM FILE STORE BOT, I CAN STORE PRIVATE "
-            "FILES IN SPECIFIED CHANNEL AND OTHER USERS "
-            "CAN ACCESS IT FROM SPECIAL LINK."
-        ),
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("↗ • ANIME HUB", url="https://t.me/Anime_Hub_94"),
-                InlineKeyboardButton("ABOUT •", callback_data="about"),
-            ],
-            [
-                InlineKeyboardButton("• CLOSE •", callback_data="close"),
-            ],
-        ]),
-    )
-
-async def id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.effective_message
-    if not msg or not msg.reply_to_message:
-        await msg.reply_text("📸 Kisi photo ko reply karke /id bhejo.")
-        return
-
-    replied = msg.reply_to_message
-    if replied.photo:
-        photo_id = replied.photo[-1].file_id
-        await msg.reply_text(
-            f"🆔 <b>Photo File ID:</b>\n\n<code>{photo_id}</code>",
-            parse_mode="HTML",
+        sent = await context.bot.copy_message(
+            chat_id=chat_id,
+            from_chat_id=int(row["channel_id"]),
+            message_id=int(row["message_id"]),
         )
-        return
-
-    await msg.reply_text("❌ Replied message me photo nahi hai.")
-
-async def help_cmd(update, context):
-    await send_text(update, """
-📚 <b>Bot Commands</b>
-
-<b>User Commands</b>
-
-/start - Wake up bot
-/my_plan - Check premium
-/request - Submit movie/series request
-
-<b>Admin Commands</b>
-
-/auto_del - Auto delete settings
-/fsub_chnl - View FSUB channels
-/add_banuser - Ban user
-/del_banuser - Unban user
-/banuser_list - Banned users
-
-/add_premium - Add premium
-/remove_premium - Remove premium
-/list_premium - Premium users
-
-/add_fsub - Add force-sub channel
-/del_fsub - Remove force-sub channel
-
-/broadcast - Broadcast
-/pbroadcast - Broadcast + pin
-
-/batch - Create batch
-/genlink - Generate file link
-
-<b>Owner Commands</b>
-
-/add_admins - Add admin
-/del_admins - Remove admin
-/admin_list - Admin list
-/users - Total users
-
-/cancel - Cancel setup
-""", parse_mode="HTML")
-
-async def save_cmd(update, context):
-    if not is_admin(update.effective_user.id):
-        return
-
-    msg = update.message.reply_to_message
-    if not msg:
-        await send_text(update, "Reply to a file/post with /save.")
-        return
-
-    try:
-        copied = await context.bot.copy_message(
-            chat_id=DB_CHANNEL_ID,
-            from_chat_id=msg.chat_id,
-            message_id=msg.message_id,
-        )
-
-        file_id = db.add_file(DB_CHANNEL_ID, copied.message_id, msg.caption or "")
-        link = bot_link(f"file_{file_id}")
-        share_url = "https://telegram.me/share/url?url=" + quote(link, safe="")
-
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📤 Share Link", url=share_url)]
-        ])
-
-        try:
-            await context.bot.edit_message_reply_markup(
-                chat_id=DB_CHANNEL_ID,
-                message_id=copied.message_id,
-                reply_markup=keyboard,
-            )
-        except TelegramError:
-            log.exception("Could not add share button")
-
-        await send_text(
-            update,
-            f"✅ <b>File Saved!</b>\n\n🆔 File ID: <code>{file_id}</code>\n\n🤖 Bot Link:\n{link}",
-            parse_mode="HTML",
-        )
-    except Exception as e:
-        log.exception("SAVE ERROR")
-        await send_text(update, f"❌ Could not save file:\n{e}")
-
-async def genlink_cmd(update, context):
-    if not is_admin(update.effective_user.id):
-        return
-    if len(context.args) != 1:
-        await send_text(update, "Usage: /genlink <file_id>")
-        return
-
-    file_id = context.args[0]
-    if not db.get_file(file_id):
-        await send_text(update, "❌ File not found.")
-        return
-
-    await send_text(update, f"🔗 <b>Bot Link</b>\n\n{bot_link('file_' + file_id)}", parse_mode="HTML")
-
-async def get_cmd(update, context):
-    if len(context.args) != 1:
-        await send_text(update, "Usage: /get <file_id>")
-        return
-    await deliver_file(update, context, context.args[0])
-
-async def deliver_file(update, context, file_id):
-    if not await check_fsub(update, context):
-        return
-
-    row = db.get_file(file_id)
-    if not row:
-        await send_text(update, "❌ File not found.")
-        return
-
-    user_id = update.effective_user.id
-    if db.is_premium(user_id):
-        await send_file(context, update.effective_chat.id, row)
-        return
-
-    short_url = shortener.create(file_id, user_id)
-    if not short_url:
-        await send_text(update, "⚠️ Shortener is not configured correctly.")
-        return
-
-    await send_text(
-        update,
-        "🔐 <b>Continue to unlock</b>\n\nComplete the shortener first. After verification, Telegram will bring you back to the bot.",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔗 Continue", url=short_url)]
-        ]),
-    )
-
-async def batch_cmd(update, context):
-    if not is_admin(update.effective_user.id):
-        return
-    if not context.args:
-        await send_text(update, "Usage: /batch <file_id> <file_id> ...")
-        return
-
-    valid = [file_id for file_id in context.args if db.get_file(file_id)]
-    if not valid:
-        await send_text(update, "❌ No valid file IDs.")
-        return
-
-    batch_id = db.create_batch(valid)
-    await send_text(
-        update,
-        f"📦 <b>Batch Created</b>\n\nFiles: {len(valid)}\n🆔 {batch_id}\n\n🤖 Bot Link:\n{bot_link('batch_' + batch_id)}",
-        parse_mode="HTML",
-    )
-
-async def deliver_batch(update, context, batch_id):
-    if not await check_fsub(update, context):
-        return
-
-    items = db.get_batch_items(batch_id)
-    if not items:
-        await send_text(update, "❌ Batch not found or empty.")
-        return
-
-    user_id = update.effective_user.id
-    if db.is_premium(user_id):
-        await send_batch(context, update.effective_chat.id, items)
-        return
-
-    short_url = shortener.create(f"batch:{batch_id}", user_id)
-    if not short_url:
-        await send_text(update, "⚠️ Shortener is not configured correctly.")
-        return
-
-    await send_text(
-        update,
-        f"📦 This batch contains <b>{len(items)}</b> files.\n\nComplete the shortener to unlock.",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔗 Continue", url=short_url)]
-        ]),
-    )
-
-async def verify_token(update, context, token):
-    payload = shortener.verify(token)
-    if not payload:
-        await send_text(update, "❌ Invalid, expired, or already-used token.")
-        return
-
-    token_user_id, target = payload
-    current_user_id = update.effective_user.id
-
-    if token_user_id != 0 and token_user_id != current_user_id:
-        await send_text(update, "❌ This verification link belongs to another user.")
+        await schedule_delete(context, chat_id, sent.message_id)
         return
 
     if target.startswith("batch:"):
-        items = db.get_batch_items(target[6:])
+        batch_id = target.split(":", 1)[1]
+        items = db.get_batch_items(batch_id)
         if not items:
-            await send_text(update, "❌ Batch not found or empty.")
+            await context.bot.send_message(chat_id, "❌ Batch is empty or invalid.")
             return
-        await send_batch(context, update.effective_chat.id, items)
+
+        for row in items:
+            try:
+                sent = await context.bot.copy_message(
+                    chat_id=chat_id,
+                    from_chat_id=int(row["channel_id"]),
+                    message_id=int(row["message_id"]),
+                )
+                await schedule_delete(context, chat_id, sent.message_id)
+            except Exception as exc:
+                log.exception("Could not copy batch file %s: %s", row.get("file_id"), exc)
         return
 
-    row = db.get_file(target)
-    if not row:
-        await send_text(update, "❌ File not found.")
-        return
-    await send_file(context, update.effective_chat.id, row)
+    await context.bot.send_message(chat_id, "❌ Invalid download link.")
 
-async def verify_cmd(update, context):
-    if len(context.args) != 1:
-        await send_text(update, "Usage: /verify <token>")
-        return
-    await verify_token(update, context, context.args[0])
 
-async def my_plan_cmd(update, context):
-    plan = db.get_premium(update.effective_user.id)
-    if not plan:
-        await send_text(update, "📋 <b>Plan:</b> Free\n\nNo active premium membership.", parse_mode="HTML")
-        return
-    await send_text(
-        update,
-        f"💎 <b>Premium Active</b>\n\n👤 User ID: {update.effective_user.id}\n⏳ Expires: {plan['expires_at']}",
-        parse_mode="HTML",
+async def send_link_result(update: Update, text: str, url: str):
+    markup = download_keyboard(url)
+    if SHORTENER_IMAGE:
+        try:
+            return await update.effective_message.reply_photo(
+                photo=SHORTENER_IMAGE,
+                caption=text,
+                reply_markup=markup,
+            )
+        except Exception as exc:
+            log.warning("SHORTENER_IMAGE could not be sent: %s", exc)
+    return await update.effective_message.reply_text(
+        text,
+        reply_markup=markup,
     )
 
-async def add_premium_cmd(update, context):
-    if not is_admin(update.effective_user.id):
+
+async def schedule_delete(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int):
+    seconds = db.get_delete_seconds()
+    if seconds <= 0:
         return
+
+    from datetime import timedelta
+    delete_at = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+    db.add_pending_delete(chat_id, message_id, delete_at)
+
+
+async def process_pending_deletes(context: ContextTypes.DEFAULT_TYPE):
+    now = datetime.now(timezone.utc)
+    for row in db.get_pending_deletes():
+        try:
+            delete_at = datetime.fromisoformat(
+                row["delete_at"].replace("Z", "+00:00")
+            )
+            if delete_at > now:
+                continue
+
+            try:
+                await context.bot.delete_message(
+                    chat_id=int(row["chat_id"]),
+                    message_id=int(row["message_id"]),
+                )
+            except Exception as exc:
+                log.debug("Delete failed for %s: %s", row["id"], exc)
+
+            db.mark_delete_done(row["id"])
+        except Exception as exc:
+            log.warning("Pending delete error: %s", exc)
+
+
+# ============================================================
+# /START
+# ============================================================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    db.add_user(
+        user.id,
+        user.username or "",
+        user.first_name or "",
+    )
+
+    if db.is_banned(user.id):
+        await update.effective_message.reply_text("🚫 You are banned from using this bot.")
+        return
+
+    # Deep-link token: /start TOKEN
+    if context.args:
+        token = context.args[0]
+        consumed = db.consume_token(token)
+
+        if not consumed:
+            await update.effective_message.reply_text("❌ This link is invalid, expired or already used.")
+            return
+
+        _, target = consumed
+
+        # IMPORTANT: premium does NOT bypass FSUB.
+        if not await require_fsub(update, context):
+            return
+
+        try:
+            await send_file_from_target(update, context, target)
+        except Exception as exc:
+            log.exception("Download failed: %s", exc)
+            await update.effective_message.reply_text(
+                "❌ Unable to send the file. The source message may no longer be accessible."
+            )
+        return
+
+    text = HOME_TEXT.format(name=user.first_name or "User")
+
+    if START_IMAGE:
+        try:
+            await update.effective_message.reply_photo(
+                photo=START_IMAGE,
+                caption=text,
+                reply_markup=home_keyboard(),
+            )
+            return
+        except Exception as exc:
+            log.warning("START_IMAGE could not be sent: %s", exc)
+
+    await update.effective_message.reply_text(
+        text,
+        reply_markup=home_keyboard(),
+    )
+
+
+# ============================================================
+# ABOUT / CLOSE
+# ============================================================
+
+async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    if q.data == "about":
+        await q.edit_message_text(
+            ABOUT_TEXT,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("↩️ Back", callback_data="home")]
+            ]),
+        )
+        return
+
+    if q.data == "home":
+        user = q.from_user
+        await q.edit_message_text(
+            HOME_TEXT.format(name=user.first_name or "User"),
+            reply_markup=home_keyboard(),
+        )
+        return
+
+    if q.data == "close":
+        try:
+            await q.message.delete()
+        except Exception:
+            pass
+        return
+
+    if q.data == "check_fsub":
+        if await require_fsub(update, context):
+            # Do not automatically reveal a file here; the user can use
+            # the original download/deep link again.
+            await q.edit_message_text(
+                "✅ All required channels joined.\n\nOpen the download link again.",
+            )
+        return
+
+
+# ============================================================
+# /GENLINK
+# ============================================================
+
+async def genlink(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    db.add_user(user.id, user.username or "", user.first_name or "")
+
+    if db.is_banned(user.id):
+        await update.effective_message.reply_text("🚫 You are banned.")
+        return
+
+    if not db.is_admin(user.id):
+        await update.effective_message.reply_text("❌ Admin only.")
+        return
+
+    reply = update.effective_message.reply_to_message
+    if not reply:
+        await update.effective_message.reply_text(
+            "Reply to any message/file and use:\n/genlink"
+        )
+        return
+
+    # Works for normal messages and forwarded messages.
+    target = f"single:{reply.chat_id}:{reply.message_id}"
+
+    # Token itself is enough. No file ID is requested.
+    token = db.create_token(user.id, target, hours=2)
+    deep_link = make_bot_deeplink(token)
+
+    # Premium still has FSUB, but /genlink generation itself is admin-only.
+    if await check_all_fsub(context.bot, user.id):
+        pass
+
+    # Premium admin gets a direct Telegram link; normal admin gets AroLinks.
+    if db.is_premium(user.id):
+        final_url = deep_link
+    else:
+        try:
+            final_url = await shorten_url(deep_link)
+        except Exception as exc:
+            log.exception("Shortener failed: %s", exc)
+            await update.effective_message.reply_text(
+                "❌ Shortener error.\n\nCheck AROLINKS_API_URL / AROLINKS_TOKEN."
+            )
+            return
+
+    await send_link_result(
+        update,
+        "Your Link is down here click on Short URL..",
+        final_url,
+    )
+
+
+# ============================================================
+# /BATCH
+# ============================================================
+
+PRIVATE_LINK_RE = re.compile(
+    r"^https?://t\.me/c/(\d+)/(\d+)(?:\?.*)?$",
+    re.IGNORECASE,
+)
+PUBLIC_LINK_RE = re.compile(
+    r"^https?://t\.me/([A-Za-z0-9_]+)/(\d+)(?:\?.*)?$",
+    re.IGNORECASE,
+)
+
+
+async def resolve_telegram_post_link(bot, link: str):
+    link = link.strip()
+
+    m = PRIVATE_LINK_RE.match(link)
+    if m:
+        internal_id = m.group(1)
+        message_id = int(m.group(2))
+        channel_id = int(f"-100{internal_id}")
+        return channel_id, message_id
+
+    m = PUBLIC_LINK_RE.match(link)
+    if m:
+        username = m.group(1)
+        message_id = int(m.group(2))
+        chat = await bot.get_chat(f"@{username}")
+        return int(chat.id), message_id
+
+    return None
+
+
+async def batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    db.add_user(user.id, user.username or "", user.first_name or "")
+
+    if db.is_banned(user.id):
+        await update.effective_message.reply_text("🚫 You are banned.")
+        return
+
+    if not db.is_admin(user.id):
+        await update.effective_message.reply_text("❌ Admin only.")
+        return
+
     if len(context.args) != 2:
-        await send_text(update, "Usage: /add_premium <user_id> <days>")
-        return
-    try:
-        user_id = int(context.args[0])
-        days = int(context.args[1])
-        db.add_premium(user_id, days)
-        await send_text(update, f"💎 Premium added for {user_id} for {days} days.")
-    except ValueError:
-        await send_text(update, "❌ User ID and days must be numbers.")
-
-async def remove_premium_cmd(update, context):
-    if not is_admin(update.effective_user.id):
-        return
-    if len(context.args) != 1:
-        await send_text(update, "Usage: /remove_premium <user_id>")
-        return
-    try:
-        db.remove_premium(int(context.args[0]))
-        await send_text(update, "✅ Premium removed.")
-    except ValueError:
-        await send_text(update, "❌ Invalid user ID.")
-
-async def list_premium_cmd(update, context):
-    if not is_admin(update.effective_user.id):
-        return
-    rows = db.list_premium()
-    if not rows:
-        await send_text(update, "💎 No active premium accounts.")
-        return
-    text = "💎 <b>Active Premium Users</b>\n\n"
-    for row in rows:
-        text += f"• {row['user_id']} — {row['expires_at']}\n"
-    await send_text(update, text, parse_mode="HTML")
-
-async def add_fsub_cmd(update, context):
-    if not is_admin(update.effective_user.id):
-        return
-    if len(context.args) < 1:
-        await send_text(update, "Usage:\n/add_fsub <channel_id>\n\nOptional:\n/add_fsub <channel_id> <invite_link>")
+        await update.effective_message.reply_text(
+            "Use exactly:\n\n"
+            "/batch (first_db_file_link) (last_db_file_link)\n\n"
+            "Example:\n"
+            "/batch https://t.me/c/1234567890/100 https://t.me/c/1234567890/120"
+        )
         return
 
-    channel_id = context.args[0]
-    invite_link = context.args[1] if len(context.args) >= 2 else ""
+    first = await resolve_telegram_post_link(context.bot, context.args[0])
+    last = await resolve_telegram_post_link(context.bot, context.args[1])
 
-    try:
-        chat = await context.bot.get_chat(channel_id)
-        title = chat.title or chat.first_name or str(channel_id)
-        username = f"https://t.me/{chat.username}" if chat.username else ""
-        if not invite_link:
-            invite_link = username
-    except TelegramError as e:
-        log.warning("Could not get channel information: %s", e)
-        title = str(channel_id)
+    if not first or not last:
+        await update.effective_message.reply_text("❌ Invalid Telegram post link.")
+        return
 
-    db.add_fsub(channel_id, invite_link, title)
-    await send_text(
-        update,
-        f"✅ <b>Force-sub channel added!</b>\n\n📢 Channel: <b>{title}</b>\n🆔 ID: <code>{channel_id}</code>\n\nMake sure the bot is an administrator in the channel.",
-        parse_mode="HTML",
+    first_channel, first_message = first
+    last_channel, last_message = last
+
+    if first_channel != last_channel:
+        await update.effective_message.reply_text(
+            "❌ First and last DB file links must belong to the same channel."
+        )
+        return
+
+    if first_message > last_message:
+        await update.effective_message.reply_text(
+            "❌ First link message ID must be smaller than the last link message ID."
+        )
+        return
+
+    first_row = db.get_file_by_message(first_channel, first_message)
+    last_row = db.get_file_by_message(last_channel, last_message)
+
+    if not first_row or not last_row:
+        await update.effective_message.reply_text(
+            "❌ Both links must point to files that already exist in the DB."
+        )
+        return
+
+    rows = db.get_files_between(
+        first_channel,
+        first_message,
+        last_message,
     )
 
-async def del_fsub_cmd(update, context):
-    if not is_admin(update.effective_user.id):
-        return
-    if len(context.args) != 1:
-        await send_text(update, "Usage: /del_fsub <channel_id>")
-        return
-    db.del_fsub(context.args[0])
-    await send_text(update, "✅ Force-sub channel removed.")
-
-async def fsub_chnl_cmd(update, context):
-    if not is_admin(update.effective_user.id):
-        return
-    channels = db.list_fsub()
-    if not channels:
-        await send_text(update, "📢 No force-sub channels configured.")
-        return
-
-    text = "📢 <b>Force-sub Channels</b>\n\n"
-    for channel in channels:
-        title = channel.get("title") or "Unknown Channel"
-        text += f"• 📢 <b>{title}</b>\n  ID: <code>{channel['channel_id']}</code>\n\n"
-    await send_text(update, text, parse_mode="HTML")
-
-async def add_banuser_cmd(update, context):
-    if not is_admin(update.effective_user.id):
-        return
-    if len(context.args) != 1:
-        await send_text(update, "Usage: /add_banuser <user_id>")
-        return
-    try:
-        user_id = int(context.args[0])
-        db.ban_user(user_id, update.effective_user.id)
-        await send_text(update, f"🚫 User {user_id} banned.")
-    except ValueError:
-        await send_text(update, "❌ User ID must be a number.")
-
-async def del_banuser_cmd(update, context):
-    if not is_admin(update.effective_user.id):
-        return
-    if len(context.args) != 1:
-        await send_text(update, "Usage: /del_banuser <user_id>")
-        return
-    try:
-        db.unban_user(int(context.args[0]))
-        await send_text(update, "✅ User unbanned.")
-    except ValueError:
-        await send_text(update, "❌ Invalid user ID.")
-
-async def banuser_list_cmd(update, context):
-    if not is_admin(update.effective_user.id):
-        return
-    rows = db.list_banned()
     if not rows:
-        await send_text(update, "🚫 No banned users.")
+        await update.effective_message.reply_text("❌ No DB files found between these posts.")
         return
-    text = "🚫 <b>Banned Users</b>\n\n"
-    for row in rows:
-        text += f"• {row['user_id']}\n"
-    await send_text(update, text, parse_mode="HTML")
 
-async def add_admins_cmd(update, context):
-    if not is_owner(update.effective_user.id):
+    file_ids = [row["file_id"] for row in rows]
+    batch_id = db.create_batch(file_ids)
+
+    token = db.create_token(user.id, f"batch:{batch_id}", hours=2)
+    deep_link = make_bot_deeplink(token)
+
+    if db.is_premium(user.id):
+        final_url = deep_link
+    else:
+        try:
+            final_url = await shorten_url(deep_link)
+        except Exception as exc:
+            log.exception("Batch shortener failed: %s", exc)
+            await update.effective_message.reply_text(
+                "❌ Shortener error.\n\nCheck AROLINKS_API_URL / AROLINKS_TOKEN."
+            )
+            return
+
+    await send_link_result(
+        update,
+        f"✅ Batch created\n\n"
+        f"📦 Files: {len(rows)}\n"
+        f"🆔 Batch: `{batch_id}`",
+        final_url,
+    )
+
+
+# ============================================================
+# OPTIONAL ADMIN COMMANDS
+# ============================================================
+
+async def addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not db.is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("❌ Admin only.")
         return
-    if len(context.args) != 1:
-        await send_text(update, "Usage: /add_admins <user_id>")
+    if not context.args:
+        await update.effective_message.reply_text("Use /addadmin USER_ID")
         return
     try:
         db.add_admin(int(context.args[0]))
-        await send_text(update, "✅ Admin added.")
+        await update.effective_message.reply_text("✅ Admin added.")
     except ValueError:
-        await send_text(update, "❌ Invalid user ID.")
+        await update.effective_message.reply_text("❌ Invalid user ID.")
 
-async def del_admins_cmd(update, context):
-    if not is_owner(update.effective_user.id):
+
+async def deladmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not db.is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("❌ Admin only.")
         return
-    if len(context.args) != 1:
-        await send_text(update, "Usage: /del_admins <user_id>")
+    if not context.args:
+        await update.effective_message.reply_text("Use /deladmin USER_ID")
         return
     try:
         db.remove_admin(int(context.args[0]))
-        await send_text(update, "✅ Admin removed.")
+        await update.effective_message.reply_text("✅ Admin removed.")
     except ValueError:
-        await send_text(update, "❌ Invalid user ID.")
+        await update.effective_message.reply_text("❌ Invalid user ID.")
 
-async def admin_list_cmd(update, context):
-    if not is_owner(update.effective_user.id):
-        return
-    admins = db.list_admins()
-    text = f"👑 Owner: <code>{OWNER_ID}</code>\n\n"
-    text += "\n".join(f"• <code>{uid}</code>" for uid in admins) if admins else "• No secondary admins"
-    await send_text(update, text, parse_mode="HTML")
 
-async def auto_del_cmd(update, context):
-    if not is_admin(update.effective_user.id):
+async def premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not db.is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("❌ Admin only.")
         return
-    current = get_delete_seconds()
-    if not context.args:
-        await send_text(update, f"⏳ Current auto-delete: {current} seconds\n\nUsage:\n/auto_del <seconds>\n\nExample:\n/auto_del 600")
+    if len(context.args) != 2:
+        await update.effective_message.reply_text("Use /premium USER_ID DAYS")
         return
     try:
-        seconds = int(context.args[0])
-        if seconds < 0:
-            raise ValueError
-    except ValueError:
-        await send_text(update, "❌ Seconds must be a valid number.")
-        return
-    db.set_setting("delete_seconds", str(seconds))
-    await send_text(update, f"✅ Auto-delete saved: {seconds} seconds.\n\nThis setting is stored in Supabase.")
-
-async def request_cmd(update, context):
-    request_text = " ".join(context.args).strip()
-    if not request_text:
-        await send_text(update, "Usage: /request <movie or series name>")
-        return
-
-    request_id = db.add_request(update.effective_user.id, request_text)
-    await send_text(update, f"✅ <b>Request submitted!</b>\n\n🆔 Request ID: {request_id}", parse_mode="HTML")
-
-    try:
-        await context.bot.send_message(
-            OWNER_ID,
-            f"📩 <b>New Request #{request_id}</b>\n\n👤 User: {update.effective_user.id}\n🎬 Request: {request_text}",
-            parse_mode="HTML",
+        uid = int(context.args[0])
+        days = int(context.args[1])
+        expires = db.add_premium(uid, days)
+        await update.effective_message.reply_text(
+            f"✅ Premium activated.\nUser: `{uid}`\nExpires: `{expires.isoformat()}`",
+            parse_mode="Markdown",
         )
-    except TelegramError:
-        pass
+    except ValueError:
+        await update.effective_message.reply_text("❌ Invalid user ID or days.")
 
-async def broadcast_cmd(update, context):
-    if not is_admin(update.effective_user.id):
+
+async def unpremium(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not db.is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("❌ Admin only.")
         return
-    text = " ".join(context.args).strip()
-    if not text:
-        await send_text(update, "Usage: /broadcast <message>")
+    if not context.args:
+        await update.effective_message.reply_text("Use /unpremium USER_ID")
         return
+    try:
+        db.remove_premium(int(context.args[0]))
+        await update.effective_message.reply_text("✅ Premium removed.")
+    except ValueError:
+        await update.effective_message.reply_text("❌ Invalid user ID.")
 
-    users = db.list_users()
-    success = failed = 0
-    for user_id in users:
-        try:
-            await context.bot.send_message(user_id, text)
-            success += 1
-        except TelegramError:
-            failed += 1
-        await asyncio.sleep(0.05)
 
-    await send_text(update, f"📣 <b>Broadcast Complete</b>\n\n✅ Sent: {success}\n❌ Failed: {failed}", parse_mode="HTML")
+# ============================================================
+# STARTUP
+# ============================================================
 
-async def pbroadcast_cmd(update, context):
-    if not is_admin(update.effective_user.id):
-        return
-    text = " ".join(context.args).strip()
-    if not text:
-        await send_text(update, "Usage: /pbroadcast <message>")
-        return
+async def post_init(application: Application):
+    global BOT_USERNAME
+    if not BOT_USERNAME:
+        me = await application.bot.get_me()
+        BOT_USERNAME = me.username or ""
+    log.info("Bot started as @%s", BOT_USERNAME)
 
-    users = db.list_users()
-    success = failed = 0
-    for user_id in users:
-        try:
-            msg = await context.bot.send_message(user_id, text)
-            try:
-                await context.bot.pin_chat_message(user_id, msg.message_id, disable_notification=True)
-            except TelegramError:
-                pass
-            success += 1
-        except TelegramError:
-            failed += 1
-        await asyncio.sleep(0.05)
-
-    await send_text(update, f"📌 <b>Broadcast Complete</b>\n\n✅ Sent: {success}\n❌ Failed: {failed}", parse_mode="HTML")
-
-async def users_cmd(update, context):
-    if not is_owner(update.effective_user.id):
-        return
-    await send_text(update, f"👥 Total users: {db.user_count()}")
-
-async def cancel_cmd(update, context):
-    context.user_data.clear()
-    await send_text(update, "✅ All active setup state has been reset.")
-
-async def addsub_cmd(update, context):
-    await add_premium_cmd(update, context)
-
-async def remsub_cmd(update, context):
-    await remove_premium_cmd(update, context)
-
-async def addadmin_cmd(update, context):
-    await add_admins_cmd(update, context)
-
-async def removeadmin_cmd(update, context):
-    await del_admins_cmd(update, context)
-
-async def admins_cmd(update, context):
-    await admin_list_cmd(update, context)
-
-async def stats_cmd(update, context):
-    if not is_admin(update.effective_user.id):
-        return
-    stats = db.stats()
-    await send_text(
-        update,
-        f"📊 <b>Statistics</b>\n\n📁 Files: {stats['files']}\n📦 Batches: {stats['batches']}\n👑 Admins: {stats['admins']}\n💎 Premium: {stats['premium']}\n👥 Users: {stats['users']}\n🚫 Banned: {stats['banned']}",
-        parse_mode="HTML",
-    )
 
 def main():
-    threading.Thread(target=start_health_server, daemon=True).start()
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("genlink", genlink))
+    app.add_handler(CommandHandler("batch", batch))
+    app.add_handler(CommandHandler("addadmin", addadmin))
+    app.add_handler(CommandHandler("deladmin", deladmin))
+    app.add_handler(CommandHandler("premium", premium))
+    app.add_handler(CommandHandler("unpremium", unpremium))
+    app.add_handler(CallbackQueryHandler(callbacks))
 
-    handlers = {
-        "start": start,
-        "id": id_cmd,
-        "help": help_cmd,
-        "save": save_cmd,
-        "get": get_cmd,
-        "verify": verify_cmd,
-        "batch": batch_cmd,
-        "genlink": genlink_cmd,
-        "my_plan": my_plan_cmd,
-        "request": request_cmd,
-        "auto_del": auto_del_cmd,
-        "fsub_chnl": fsub_chnl_cmd,
-        "add_fsub": add_fsub_cmd,
-        "del_fsub": del_fsub_cmd,
-        "add_banuser": add_banuser_cmd,
-        "del_banuser": del_banuser_cmd,
-        "banuser_list": banuser_list_cmd,
-        "add_premium": add_premium_cmd,
-        "remove_premium": remove_premium_cmd,
-        "list_premium": list_premium_cmd,
-        "add_admins": add_admins_cmd,
-        "del_admins": del_admins_cmd,
-        "admin_list": admin_list_cmd,
-        "broadcast": broadcast_cmd,
-        "pbroadcast": pbroadcast_cmd,
-        "cancel": cancel_cmd,
-        "users": users_cmd,
-        "addsub": addsub_cmd,
-        "remsub": remsub_cmd,
-        "addadmin": addadmin_cmd,
-        "removeadmin": removeadmin_cmd,
-        "admins": admins_cmd,
-        "stats": stats_cmd,
-    }
+    # Pending deletion worker.
+    app.job_queue.run_repeating(process_pending_deletes, interval=15, first=15)
 
-    for command, function in handlers.items():
-        app.add_handler(CommandHandler(command, function))
+    log.info("Starting polling...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
-    app.add_handler(CallbackQueryHandler(fsub_callback, pattern="^check_fsub$"))
-
-    log.info("🔥 Bot starting on Render...")
-    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()

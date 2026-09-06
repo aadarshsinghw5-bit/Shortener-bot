@@ -1,6 +1,8 @@
 import os
 import re
 import logging
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime, timezone
 
 import aiohttp
@@ -74,6 +76,31 @@ This bot creates special links for files/messages.
 Use the buttons below to continue."""
 
 # ============================================================
+# RENDER HEALTH SERVER
+# ============================================================
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"Bot is running!")
+
+    def log_message(self, fmt, *args):
+        return
+
+
+def start_health_server():
+    try:
+        port = int(os.environ.get("PORT", "10000"))
+        server = HTTPServer(("0.0.0.0", port), HealthHandler)
+        log.info("Health server running on port %s", port)
+        server.serve_forever()
+    except Exception:
+        log.exception("Health server stopped")
+
+
+# ============================================================
 # DATABASE
 # ============================================================
 
@@ -98,10 +125,10 @@ def home_keyboard():
 
 def download_keyboard(short_url: str):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Click to download your file", url=short_url)],
+        [InlineKeyboardButton("• CLICK HERE TO DOWNLOAD •", url=short_url)],
         [
-            InlineKeyboardButton("How to Open", url=TUTORIAL_URL),
-            InlineKeyboardButton("Premium", url=PREMIUM_URL),
+            InlineKeyboardButton("PREMIUM", url=PREMIUM_URL),
+            InlineKeyboardButton("TUTORIAL", url=TUTORIAL_URL),
         ],
     ])
 
@@ -311,12 +338,14 @@ async def send_link_result(update: Update, text: str, url: str):
                 photo=SHORTENER_IMAGE,
                 caption=text,
                 reply_markup=markup,
+                parse_mode="HTML",
             )
         except Exception as exc:
             log.warning("SHORTENER_IMAGE could not be sent: %s", exc)
     return await update.effective_message.reply_text(
         text,
         reply_markup=markup,
+        parse_mode="HTML",
     )
 
 
@@ -372,17 +401,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Deep-link token: /start TOKEN
     if context.args:
         token = context.args[0]
-        consumed = db.consume_token(token)
+        pending = db.get_token(token)
 
+        if not pending:
+            await update.effective_message.reply_text("❌ This link is invalid, expired or already used.")
+            return
+
+        # IMPORTANT: premium does NOT bypass FSUB.
+        # Check FSUB BEFORE consuming the one-time token so a user who
+        # has not joined the required channels can retry after joining.
+        if not await require_fsub(update, context):
+            return
+
+        consumed = db.consume_token(token)
         if not consumed:
             await update.effective_message.reply_text("❌ This link is invalid, expired or already used.")
             return
 
         _, target = consumed
-
-        # IMPORTANT: premium does NOT bypass FSUB.
-        if not await require_fsub(update, context):
-            return
 
         try:
             await send_file_from_target(update, context, target)
@@ -484,10 +520,6 @@ async def genlink(update: Update, context: ContextTypes.DEFAULT_TYPE):
     token = db.create_token(user.id, target, hours=2)
     deep_link = make_bot_deeplink(token)
 
-    # Premium still has FSUB, but /genlink generation itself is admin-only.
-    if await check_all_fsub(context.bot, user.id):
-        pass
-
     # Premium admin gets a direct Telegram link; normal admin gets AroLinks.
     if db.is_premium(user.id):
         final_url = deep_link
@@ -503,7 +535,9 @@ async def genlink(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await send_link_result(
         update,
-        "Your Link is down here click on Short URL..",
+        "🇮🇳 <b>HEY BRO/SIS,</b>\n\n"
+        "👇 <b>YOUR LINK IS READY, KINDLY CLICK ON DOWNLOAD BUTTON! 👇</b>\n\n"
+        "<b>TO BUY PREMIUM, CONTACT: @Its_Lozo</b>",
         final_url,
     )
 
@@ -624,9 +658,9 @@ async def batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await send_link_result(
         update,
-        f"✅ Batch created\n\n"
-        f"📦 Files: {len(rows)}\n"
-        f"🆔 Batch: `{batch_id}`",
+        "🇮🇳 <b>HEY BRO/SIS,</b>\n\n"
+        "👇 <b>YOUR LINK IS READY, KINDLY CLICK ON DOWNLOAD BUTTON! 👇</b>\n\n"
+        "<b>TO BUY PREMIUM, CONTACT: @Its_Lozo</b>",
         final_url,
     )
 
@@ -709,6 +743,8 @@ async def post_init(application: Application):
 
 
 def main():
+    threading.Thread(target=start_health_server, daemon=True).start()
+
     app = (
         ApplicationBuilder()
         .token(BOT_TOKEN)

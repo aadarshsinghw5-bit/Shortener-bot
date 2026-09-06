@@ -1,37 +1,41 @@
-# File Store Bot - final flow
+# File Store Bot
 
-## Commands
-- `/genlink` — reply to ANY message and run this command. No file ID is requested.
-- `/batch FIRST_DB_LINK LAST_DB_LINK` — first and last Telegram post must already exist in `files` table. All DB files between their message IDs are included.
-- `/premium USER_ID DAYS`
-- `/unpremium USER_ID`
-- `/addadmin USER_ID`
-- `/deladmin USER_ID`
+GitHub/Render-ready Telegram file-store bot using Supabase and AroLinks.
 
-## Single-message flow
-Admin replies to any normal/forwarded message:
+## Current flow
+
+### Single `/genlink`
+Reply to **any normal message or forwarded message** and send:
+
 `/genlink`
 
-Normal user:
-`/genlink -> AroLinks -> Telegram deep link -> FSUB check -> file`
+No file ID is requested and the replied message does **not** need to exist in the DB. The bot creates a temporary Telegram deep-link token for that exact message. Free users get an AroLinks URL; premium users get the direct Telegram deep link.
 
-Premium user:
-`/genlink -> direct Telegram deep link -> FSUB check -> file`
+### Batch `/batch`
+Batch accepts exactly two Telegram post links:
 
-Premium NEVER bypasses FSUB.
-
-## Batch flow
-Only DB files are used for batches:
 `/batch (first_db_file_link) (last_db_file_link)`
 
-The first and last links must point to DB rows in the same channel. Every DB file whose
-message_id lies between those two posts (inclusive) is added in message order.
+Both links must point to files already present in the DB, in the same DB channel. Every DB file between those two message IDs (inclusive) is included.
 
-## Important
-Do not commit `.env` or real tokens to GitHub.
-For AroLinks, the preferred setup is `AROLINKS_QUICK_LINK`: copy the Quick/Easy Link
-template from AroLinks Tools and paste it exactly as provided. The template normally
-contains `api=...&url=`. Do not commit the real token/template to GitHub.
+### FSUB + Premium
+Premium users **must still complete FSUB**. Premium only removes the AroLinks step; it never bypasses force-subscription.
 
-If you use API mode instead, configure `AROLINKS_API_URL` and parameter names from your
-AroLinks dashboard/documentation.
+### Shortener result UI
+The shortener result uses the screenshot-style bold/uppercase layout:
+- `HEY BRO/SIS`
+- `YOUR LINK IS READY...`
+- `TO BUY PREMIUM, CONTACT: @Its_Lozo`
+- `• CLICK HERE TO DOWNLOAD •`
+- `PREMIUM` → `https://t.me/PremiumHub094`
+- `TUTORIAL` → `https://t.me/Tutorial_Hub_94/4`
+
+Set `SHORTENER_IMAGE` to the Telegram `file_id` (or supported image URL) you want above this text.
+
+## Render + UptimeRobot
+The bot runs Telegram long polling and also starts a small HTTP health server on Render's `PORT`. UptimeRobot should **only monitor the Render health URL**; it must not run another copy of the bot.
+
+A Telegram `Conflict: terminated by other getUpdates request` means another process/service is polling the same bot token. Keep exactly **one** bot polling instance running.
+
+## Security
+Never commit `.env`, `BOT_TOKEN`, `SUPABASE_KEY`, or the AroLinks token/Quick Link to GitHub. Put them in Render Environment Variables.

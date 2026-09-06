@@ -268,6 +268,30 @@ class Database:
         }).execute()
         return token
 
+    def get_token(self, token):
+        r = self.db.table("tokens").select("*").eq(
+            "token", token
+        ).limit(1).execute()
+        if not r.data:
+            return None
+
+        row = r.data[0]
+        if row.get("used"):
+            return None
+
+        try:
+            expiry = datetime.fromisoformat(
+                row["expires_at"].replace("Z", "+00:00")
+            )
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+            if expiry <= datetime.now(timezone.utc):
+                return None
+        except Exception:
+            return None
+
+        return row
+
     def consume_token(self, token):
         r = self.db.table("tokens").select("*").eq(
             "token", token

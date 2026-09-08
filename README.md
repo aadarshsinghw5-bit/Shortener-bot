@@ -1,41 +1,129 @@
-# File Store Bot
+# File Store Bot — Clean Final Build
 
-GitHub/Render-ready Telegram file-store bot using Supabase and AroLinks.
+This is a clean implementation of the latest agreed flow.
 
-## Current flow
+## UI
 
-### Single `/genlink`
-Reply to **any normal message or forwarded message** and send:
+### /start
+Uses the image saved through `/setimage` and the requested screenshot-style start caption:
+
+Hi There....! 💥
+
+I am a file-store bot.
+I can generate links directly with no problems.
+
+My Owner: @Its_Lozo
+
+Buttons: `ABOUT` and `CLOSE`.
+
+### ABOUT
+Keeps the start image and shows:
+
+About Us..
+
+➤ Made for : Anime Hub
+➤ Owner : @Its_Lozo
+➤ Developer : @Its_Lozo
+
+Adios !!
+
+Buttons: `BACK` and `CLOSE`.
+
+### CLOSE
+Deletes the bot's current message.
+
+## Links
+
+### Single
+Reply to ANY message/file and use:
 
 `/genlink`
 
-No file ID is requested and the replied message does **not** need to exist in the DB. The bot creates a temporary Telegram deep-link token for that exact message. Free users get an AroLinks URL; premium users get the direct Telegram deep link.
+No file ID is requested. `/save` is not implemented.
 
-### Batch `/batch`
-Batch accepts exactly two Telegram post links:
+The message reference is stored in the token, so a single link does not need the message to be in the DB channel.
 
-`/batch (first_db_file_link) (last_db_file_link)`
+### Batch
+Only:
 
-Both links must point to files already present in the DB, in the same DB channel. Every DB file between those two message IDs (inclusive) is included.
+`/batch FIRST_DB_FILE_LINK LAST_DB_FILE_LINK`
 
-### FSUB + Premium
-Premium users **must still complete FSUB**. Premium only removes the AroLinks step; it never bypasses force-subscription.
+Both links must point to posts in the configured DB channel. All indexed DB posts between those message IDs are included.
 
-### Shortener result UI
-The shortener result uses the screenshot-style bold/uppercase layout:
-- `HEY BRO/SIS`
-- `YOUR LINK IS READY...`
-- `TO BUY PREMIUM, CONTACT: @Its_Lozo`
+## Shortener
+
+Non-premium users:
+1. Open generated link.
+2. FSUB is checked.
+3. Download page is shown.
+4. User clicks the download button.
+5. AroLinks is completed.
+6. The bot sends the requested file(s).
+
+Shortener tokens are valid for 2 hours and are single-use.
+
+Premium users:
+- Still must pass FSUB.
+- Skip AroLinks.
+- Receive the file directly.
+
+Download page buttons:
 - `• CLICK HERE TO DOWNLOAD •`
-- `PREMIUM` → `https://t.me/PremiumHub094`
-- `TUTORIAL` → `https://t.me/Tutorial_Hub_94/4`
+- `PREMIUM` → https://t.me/PremiumHub094
+- `TUTORIAL` → https://t.me/Tutorial_Hub_94/4
 
-Set `SHORTENER_IMAGE` to the Telegram `file_id` (or supported image URL) you want above this text.
+Contact: `@Its_Lozo`
 
-## Render + UptimeRobot
-The bot runs Telegram long polling and also starts a small HTTP health server on Render's `PORT`. UptimeRobot should **only monitor the Render health URL**; it must not run another copy of the bot.
+## Start image
 
-A Telegram `Conflict: terminated by other getUpdates request` means another process/service is polling the same bot token. Keep exactly **one** bot polling instance running.
+Send a photo to the bot, reply to it with:
 
-## Security
-Never commit `.env`, `BOT_TOKEN`, `SUPABASE_KEY`, or the AroLinks token/Quick Link to GitHub. Put them in Render Environment Variables.
+`/setimage`
+
+The Telegram file ID is saved in Supabase. You do NOT need a START_IMAGE URL environment variable.
+
+## DB channel
+
+Add the bot as an administrator to the configured DB channel.
+
+New channel posts are automatically indexed in `files`.
+
+Set:
+
+`DB_CHANNEL_ID=-100xxxxxxxxxx`
+
+## FSUB
+
+Add:
+
+`/addfsub -1001234567890 https://t.me/+invite Channel Name`
+
+Remove:
+
+`/delfsub -1001234567890`
+
+The bot must be able to call `getChatMember` for the FSUB channel.
+
+## Premium
+
+Add:
+
+`/premium USER_ID DAYS`
+
+Remove:
+
+`/unpremium USER_ID`
+
+## Render
+
+Use a **Background Worker**:
+
+Build:
+`pip install -r requirements.txt`
+
+Start:
+`python -u bot.py`
+
+Important: Telegram polling allows only one active `getUpdates` consumer for a bot token. Do NOT run this same bot token in a second Render service, local process, VPS, or UptimeRobot process.
+
+UptimeRobot should only monitor an HTTP health endpoint if one is added; it must not run the bot itself.

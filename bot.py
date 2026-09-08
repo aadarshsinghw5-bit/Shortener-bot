@@ -1,771 +1,514 @@
 import os
-import re
 import logging
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from datetime import datetime, timezone
+import asyncio
+import re
 
-import aiohttp
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+from dotenv import load_dotenv
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.constants import ChatMemberStatus
 from telegram.ext import (
-    Application,
-    ApplicationBuilder,
-    CallbackQueryHandler,
-    CommandHandler,
-    ContextTypes,
+    Application, CommandHandler, CallbackQueryHandler,
+    ContextTypes, MessageHandler, filters
 )
 
 from database import Database
+from shortener import Shortener
 
+load_dotenv()
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO,
 )
 log = logging.getLogger("file-store-bot")
 
-# ============================================================
-# ENV
-# ============================================================
-
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-BOT_USERNAME = os.environ.get("BOT_USERNAME", "").lstrip("@")
-START_IMAGE = os.environ.get("START_IMAGE", "").strip()
-SHORTENER_IMAGE = os.environ.get("SHORTENER_IMAGE", "").strip()
-
-# Your AroLinks token. NEVER put the real token in GitHub.
-AROLINKS_TOKEN = os.environ.get("AROLINKS_TOKEN", "").strip()
-
-# AroLinks API endpoint. Keep configurable because API endpoints can change.
-# Example:
-#   https://arolinks.com/api
-# or the exact endpoint shown in your AroLinks dashboard.
-AROLINKS_API_URL = os.environ.get("AROLINKS_API_URL", "").strip()
-AROLINKS_QUICK_LINK = os.environ.get("AROLINKS_QUICK_LINK", "").strip()
-
-# If your AroLinks dashboard requires a fixed API parameter name,
-# these can be changed without touching the rest of the bot.
-AROLINKS_TOKEN_PARAM = os.environ.get("AROLINKS_TOKEN_PARAM", "api")
-AROLINKS_URL_PARAM = os.environ.get("AROLINKS_URL_PARAM", "url")
-
-# Public links used by the buttons.
-TUTORIAL_URL = os.environ.get("TUTORIAL_URL", "https://t.me/").strip()
-PREMIUM_URL = os.environ.get("PREMIUM_URL", "https://t.me/").strip()
-
-# This is the text shown on the /start home screen.
-# Change only these strings if you want different wording.
-HOME_TEXT = """⚡ HEY, {name} ~
-
-I AM FILE STORE BOT, I CAN STORE PRIVATE
-FILES IN SPECIFIED CHANNEL AND OTHER USERS
-CAN ACCESS IT FROM SPECIAL LINK."""
-
-ABOUT_TEXT = """ℹ️ ABOUT
-
-This bot creates special links for files/messages.
-
-• Single message: reply to any message and use /genlink
-• Batch: use /batch with the first and last DB file links
-• Premium users still have to join all required channels
-• Premium users get direct access without the shortener
-
-Use the buttons below to continue."""
-
-# ============================================================
-# RENDER HEALTH SERVER
-# ============================================================
-
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(b"Bot is running!")
-
-    def log_message(self, fmt, *args):
-        return
-
-
-def start_health_server():
-    try:
-        port = int(os.environ.get("PORT", "10000"))
-        server = HTTPServer(("0.0.0.0", port), HealthHandler)
-        log.info("Health server running on port %s", port)
-        server.serve_forever()
-    except Exception:
-        log.exception("Health server stopped")
-
-
-# ============================================================
-# DATABASE
-# ============================================================
+BOT_USERNAME = os.environ["BOT_USERNAME"].lstrip("@")
+OWNER_ID = int(os.environ["OWNER_ID"])
+DB_CHANNEL_ID = int(os.environ["DB_CHANNEL_ID"])
 
 db = Database()
+shortener = Shortener(db)
 
 
-# ============================================================
-# HELPERS
-# ============================================================
-
-def home_keyboard():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("↗ • ANIME HUB", url=os.environ.get("ANIME_HUB_URL", "https://t.me/")),
-            InlineKeyboardButton("ABOUT •", callback_data="about"),
-        ],
-        [
-            InlineKeyboardButton("• CLOSE •", callback_data="close"),
-        ],
-    ])
+def start_image():
+    return db.get_setting("start_image", "")
 
 
-def download_keyboard(short_url: str):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("• CLICK HERE TO DOWNLOAD •", url=short_url)],
-        [
-            InlineKeyboardButton("PREMIUM", url=PREMIUM_URL),
-            InlineKeyboardButton("TUTORIAL", url=TUTORIAL_URL),
-        ],
-    ])
+def start_caption():
+    # Keep this text/style as requested.
+    return (
+        "Hi There....! 💥\n\n"
+        "I am a file-store bot.\n"
+        "I can generate links directly with no problems.\n\n"
+        "My Owner: @Its_Lozo"
+    )
 
 
-def fsub_keyboard(channels):
-    rows = []
-    for ch in channels:
-        title = ch.get("title") or ch.get("channel_id", "Channel")
-        link = ch.get("invite_link") or ""
-        if link:
-            rows.append([InlineKeyboardButton(f"• {title} •", url=link)])
-    rows.append([InlineKeyboardButton("♻️ Try Again", callback_data="check_fsub")])
-    return InlineKeyboardMarkup(rows)
+def about_caption():
+    return (
+        "<b>About Us..</b>\n\n"
+        "➤ Made for : <a href=\"https://t.me/Anime_Hub_94\">Anime Hub</a>\n"
+        "➤ Owner : <a href=\"https://t.me/Its_Lozo\">@Its_Lozo</a>\n"
+        "➤ Developer : <a href=\"https://t.me/Its_Lozo\">@Its_Lozo</a>\n\n"
+        "Adios !!"
+    )
 
 
-async def is_joined(bot, user_id: int, channel_id: str) -> bool:
+def start_keyboard():
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("ABOUT", callback_data="about"),
+        InlineKeyboardButton("CLOSE", callback_data="close"),
+    ]])
+
+
+def about_keyboard():
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("BACK", callback_data="back"),
+        InlineKeyboardButton("CLOSE", callback_data="close"),
+    ]])
+
+
+async def render_start(message):
+    image = start_image()
+    if image:
+        try:
+            await message.reply_photo(
+                photo=image,
+                caption=start_caption(),
+                reply_markup=start_keyboard(),
+            )
+            return
+        except Exception:
+            log.exception("Could not send configured start image")
+    await message.reply_text(start_caption(), reply_markup=start_keyboard())
+
+
+async def edit_start(query):
+    image = start_image()
+    if image:
+        try:
+            await query.edit_message_media(
+                media=InputMediaPhoto(media=image, caption=start_caption()),
+                reply_markup=start_keyboard(),
+            )
+            return
+        except Exception:
+            log.exception("Could not restore start image")
     try:
-        member = await bot.get_chat_member(chat_id=int(channel_id), user_id=user_id)
-        return member.status in {
-            ChatMemberStatus.MEMBER,
-            ChatMemberStatus.ADMINISTRATOR,
-            ChatMemberStatus.OWNER,
-        }
-    except Exception as exc:
-        log.warning("FSUB check failed for %s / %s: %s", channel_id, user_id, exc)
-        return False
+        await query.edit_message_text(
+            text=start_caption(), reply_markup=start_keyboard()
+        )
+    except Exception:
+        pass
 
 
-async def check_all_fsub(bot, user_id: int):
-    channels = db.list_fsub()
+async def edit_about(query):
+    # If the start message contains a photo, keep the same image while changing
+    # only its caption, matching the screenshot flow.
+    try:
+        await query.edit_message_caption(
+            caption=about_caption(),
+            parse_mode="HTML",
+            reply_markup=about_keyboard(),
+        )
+    except Exception:
+        await query.edit_message_text(
+            text=about_caption(),
+            parse_mode="HTML",
+            reply_markup=about_keyboard(),
+        )
+
+
+async def is_fsub_member(bot, user_id):
     missing = []
-    for ch in channels:
-        if not await is_joined(bot, user_id, str(ch["channel_id"])):
-            missing.append(ch)
+    for row in db.list_fsub():
+        try:
+            member = await bot.get_chat_member(int(row["channel_id"]), user_id)
+            if member.status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
+                missing.append(row)
+        except Exception:
+            # A channel that cannot be checked is treated as required.
+            missing.append(row)
     return missing
 
 
-async def require_fsub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    user = update.effective_user
-    missing = await check_all_fsub(context.bot, user.id)
-
-    if not missing:
-        return True
-
-    text = "🔒 Please join all required channels first.\n\nThen tap **Try Again**."
-    if update.callback_query:
-        try:
-            await update.callback_query.answer()
-            await update.callback_query.edit_message_text(
-                text,
-                reply_markup=fsub_keyboard(missing),
-                parse_mode="Markdown",
-            )
-        except Exception:
-            await update.callback_query.message.reply_text(
-                text,
-                reply_markup=fsub_keyboard(missing),
-                parse_mode="Markdown",
-            )
-    else:
-        await update.effective_message.reply_text(
-            text,
-            reply_markup=fsub_keyboard(missing),
-            parse_mode="Markdown",
-        )
-    return False
+def fsub_keyboard(rows):
+    buttons = []
+    for row in rows:
+        if row.get("invite_link"):
+            buttons.append([InlineKeyboardButton(
+                f"JOIN {row.get('title') or 'CHANNEL'}",
+                url=row["invite_link"]
+            )])
+    buttons.append([InlineKeyboardButton("✅ CHECK JOIN", callback_data="check_fsub")])
+    return InlineKeyboardMarkup(buttons)
 
 
-def make_bot_deeplink(token: str) -> str:
-    if not BOT_USERNAME:
-        raise RuntimeError("BOT_USERNAME is missing")
-    return f"https://t.me/{BOT_USERNAME}?start={token}"
+def token_link(token):
+    return f"https://t.me/{BOT_USERNAME}?start=verify_{token}"
 
-
-async def shorten_url(long_url: str) -> str:
-    """
-    Shorten using either:
-      1) AroLinks Quick/Easy Link (recommended), or
-      2) a configured AroLinks API endpoint.
-
-    Quick link normally looks like:
-      https://.../?api=TOKEN&url=
-
-    Put the complete Quick Link template in AROLINKS_QUICK_LINK,
-    including the final `url=`. The destination URL is URL-encoded.
-    """
-    if AROLINKS_QUICK_LINK:
-        from urllib.parse import quote
-        separator = "" if AROLINKS_QUICK_LINK.endswith(("=", "&", "?")) else "&url="
-        if "url=" in AROLINKS_QUICK_LINK:
-            return AROLINKS_QUICK_LINK + quote(long_url, safe="")
-        return AROLINKS_QUICK_LINK + separator + quote(long_url, safe="")
-
-    if not AROLINKS_TOKEN:
-        raise RuntimeError("AROLINKS_TOKEN is missing")
-    if not AROLINKS_API_URL:
-        raise RuntimeError("AROLINKS_API_URL is missing")
-
-    params = {
-        AROLINKS_TOKEN_PARAM: AROLINKS_TOKEN,
-        AROLINKS_URL_PARAM: long_url,
-    }
-
-    timeout = aiohttp.ClientTimeout(total=20)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(AROLINKS_API_URL, params=params) as resp:
-            raw = await resp.text()
-
-            if resp.status != 200:
-                raise RuntimeError(f"AroLinks HTTP {resp.status}: {raw[:300]}")
-
-            try:
-                data = await resp.json(content_type=None)
-            except Exception:
-                data = None
-
-            if isinstance(data, dict):
-                for key in (
-                    "shortenedUrl",
-                    "shortened_url",
-                    "short_url",
-                    "short",
-                    "url",
-                    "link",
-                ):
-                    value = data.get(key)
-                    if isinstance(value, str) and value.startswith(("http://", "https://")):
-                        return value
-
-                for parent in ("data", "result"):
-                    child = data.get(parent)
-                    if isinstance(child, dict):
-                        for key in ("shortenedUrl", "shortened_url", "short_url", "short", "url", "link"):
-                            value = child.get(key)
-                            if isinstance(value, str) and value.startswith(("http://", "https://")):
-                                return value
-
-            text = raw.strip().strip('"')
-            match = re.search(r"https?://\S+", text)
-            if match:
-                return match.group(0).rstrip('"\'')
-    raise RuntimeError("Could not find a short URL in the AroLinks response.")
-
-
-async def send_file_from_target(update: Update, context: ContextTypes.DEFAULT_TYPE, target: str):
-    """
-    target formats:
-      single:<source_chat_id>:<source_message_id>
-      file:<file_id>
-      batch:<batch_id>
-    """
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-
-    if target.startswith("single:"):
-        _, source_chat_id, source_message_id = target.split(":", 2)
-        sent = await context.bot.copy_message(
-            chat_id=chat_id,
-            from_chat_id=int(source_chat_id),
-            message_id=int(source_message_id),
-        )
-        await schedule_delete(context, chat_id, sent.message_id)
-        return
-
-    if target.startswith("file:"):
-        file_id = target.split(":", 1)[1]
-        row = db.get_file(file_id)
-        if not row:
-            await context.bot.send_message(chat_id, "❌ File link is invalid or expired.")
-            return
-
-        sent = await context.bot.copy_message(
-            chat_id=chat_id,
-            from_chat_id=int(row["channel_id"]),
-            message_id=int(row["message_id"]),
-        )
-        await schedule_delete(context, chat_id, sent.message_id)
-        return
-
-    if target.startswith("batch:"):
-        batch_id = target.split(":", 1)[1]
-        items = db.get_batch_items(batch_id)
-        if not items:
-            await context.bot.send_message(chat_id, "❌ Batch is empty or invalid.")
-            return
-
-        for row in items:
-            try:
-                sent = await context.bot.copy_message(
-                    chat_id=chat_id,
-                    from_chat_id=int(row["channel_id"]),
-                    message_id=int(row["message_id"]),
-                )
-                await schedule_delete(context, chat_id, sent.message_id)
-            except Exception as exc:
-                log.exception("Could not copy batch file %s: %s", row.get("file_id"), exc)
-        return
-
-    await context.bot.send_message(chat_id, "❌ Invalid download link.")
-
-
-async def send_link_result(update: Update, text: str, url: str):
-    markup = download_keyboard(url)
-    if SHORTENER_IMAGE:
-        try:
-            return await update.effective_message.reply_photo(
-                photo=SHORTENER_IMAGE,
-                caption=text,
-                reply_markup=markup,
-                parse_mode="HTML",
-            )
-        except Exception as exc:
-            log.warning("SHORTENER_IMAGE could not be sent: %s", exc)
-    return await update.effective_message.reply_text(
-        text,
-        reply_markup=markup,
-        parse_mode="HTML",
-    )
-
-
-async def schedule_delete(context: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int):
-    seconds = db.get_delete_seconds()
-    if seconds <= 0:
-        return
-
-    from datetime import timedelta
-    delete_at = datetime.now(timezone.utc) + timedelta(seconds=seconds)
-    db.add_pending_delete(chat_id, message_id, delete_at)
-
-
-async def process_pending_deletes(context: ContextTypes.DEFAULT_TYPE):
-    now = datetime.now(timezone.utc)
-    for row in db.get_pending_deletes():
-        try:
-            delete_at = datetime.fromisoformat(
-                row["delete_at"].replace("Z", "+00:00")
-            )
-            if delete_at > now:
-                continue
-
-            try:
-                await context.bot.delete_message(
-                    chat_id=int(row["chat_id"]),
-                    message_id=int(row["message_id"]),
-                )
-            except Exception as exc:
-                log.debug("Delete failed for %s: %s", row["id"], exc)
-
-            db.mark_delete_done(row["id"])
-        except Exception as exc:
-            log.warning("Pending delete error: %s", exc)
-
-
-# ============================================================
-# /START
-# ============================================================
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    db.add_user(
-        user.id,
-        user.username or "",
-        user.first_name or "",
-    )
-
-    if db.is_banned(user.id):
-        await update.effective_message.reply_text("🚫 You are banned from using this bot.")
-        return
-
-    # Deep-link token: /start TOKEN
-    if context.args:
-        token = context.args[0]
-        pending = db.get_token(token)
-
-        if not pending:
-            await update.effective_message.reply_text("❌ This link is invalid, expired or already used.")
-            return
-
-        # IMPORTANT: premium does NOT bypass FSUB.
-        # Check FSUB BEFORE consuming the one-time token so a user who
-        # has not joined the required channels can retry after joining.
-        if not await require_fsub(update, context):
-            return
-
-        consumed = db.consume_token(token)
-        if not consumed:
-            await update.effective_message.reply_text("❌ This link is invalid, expired or already used.")
-            return
-
-        _, target = consumed
-
-        try:
-            await send_file_from_target(update, context, target)
-        except Exception as exc:
-            log.exception("Download failed: %s", exc)
-            await update.effective_message.reply_text(
-                "❌ Unable to send the file. The source message may no longer be accessible."
-            )
-        return
-
-    text = HOME_TEXT.format(name=user.first_name or "User")
-
-    if START_IMAGE:
-        try:
-            await update.effective_message.reply_photo(
-                photo=START_IMAGE,
-                caption=text,
-                reply_markup=home_keyboard(),
-            )
-            return
-        except Exception as exc:
-            log.warning("START_IMAGE could not be sent: %s", exc)
-
-    await update.effective_message.reply_text(
-        text,
-        reply_markup=home_keyboard(),
-    )
-
-
-# ============================================================
-# ABOUT / CLOSE
-# ============================================================
-
-async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-
-    if q.data == "about":
-        await q.edit_message_text(
-            ABOUT_TEXT,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("↩️ Back", callback_data="home")]
-            ]),
-        )
-        return
-
-    if q.data == "home":
-        user = q.from_user
-        await q.edit_message_text(
-            HOME_TEXT.format(name=user.first_name or "User"),
-            reply_markup=home_keyboard(),
-        )
-        return
-
-    if q.data == "close":
-        try:
-            await q.message.delete()
-        except Exception:
-            pass
-        return
-
-    if q.data == "check_fsub":
-        if await require_fsub(update, context):
-            # Do not automatically reveal a file here; the user can use
-            # the original download/deep link again.
-            await q.edit_message_text(
-                "✅ All required channels joined.\n\nOpen the download link again.",
-            )
-        return
-
-
-# ============================================================
-# /GENLINK
-# ============================================================
 
 async def genlink(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    db.add_user(user.id, user.username or "", user.first_name or "")
+    uid = update.effective_user.id
+    if uid != OWNER_ID and not db.is_admin(uid):
+        return await update.message.reply_text("❌ You are not authorized.")
 
-    if db.is_banned(user.id):
-        await update.effective_message.reply_text("🚫 You are banned.")
-        return
-
-    if not db.is_admin(user.id):
-        await update.effective_message.reply_text("❌ Admin only.")
-        return
-
-    reply = update.effective_message.reply_to_message
-    if not reply:
-        await update.effective_message.reply_text(
-            "Reply to any message/file and use:\n/genlink"
+    replied = update.message.reply_to_message
+    if not replied:
+        return await update.message.reply_text(
+            "Reply to the message/file and use /genlink."
         )
-        return
 
-    # Works for normal messages and forwarded messages.
-    target = f"single:{reply.chat_id}:{reply.message_id}"
+    # No file ID and no /save. Any message the bot can later copy from
+    # (including a forwarded message) can be linked directly.
+    target = f"message:{replied.chat_id}:{replied.message_id}"
+    token = db.create_token(uid, target, hours=2)
+    url = token_link(token)
 
-    # Token itself is enough. No file ID is requested.
-    token = db.create_token(user.id, target, hours=2)
-    deep_link = make_bot_deeplink(token)
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            "🔗 SHARE LINK",
+            url=f"https://t.me/share/url?url={url}"
+        )
+    ]])
 
-    # Premium admin gets a direct Telegram link; normal admin gets AroLinks.
-    if db.is_premium(user.id):
-        final_url = deep_link
-    else:
-        try:
-            final_url = await shorten_url(deep_link)
-        except Exception as exc:
-            log.exception("Shortener failed: %s", exc)
-            await update.effective_message.reply_text(
-                "❌ Shortener error.\n\nCheck AROLINKS_API_URL / AROLINKS_TOKEN."
-            )
-            return
-
-    await send_link_result(
-        update,
-        "🇮🇳 <b>HEY BRO/SIS,</b>\n\n"
-        "👇 <b>YOUR LINK IS READY, KINDLY CLICK ON DOWNLOAD BUTTON! 👇</b>\n\n"
-        "<b>TO BUY PREMIUM, CONTACT: @Its_Lozo</b>",
-        final_url,
+    await update.message.reply_text(
+        f"✅ <b>Link generated</b>\n\n"
+        f"{url}\n\n"
+        f"⏳ Valid for 2 hours and usable once.",
+        parse_mode="HTML",
+        reply_markup=keyboard,
+        disable_web_page_preview=True,
     )
 
 
-# ============================================================
-# /BATCH
-# ============================================================
-
-PRIVATE_LINK_RE = re.compile(
-    r"^https?://t\.me/c/(\d+)/(\d+)(?:\?.*)?$",
-    re.IGNORECASE,
-)
-PUBLIC_LINK_RE = re.compile(
-    r"^https?://t\.me/([A-Za-z0-9_]+)/(\d+)(?:\?.*)?$",
-    re.IGNORECASE,
-)
-
-
-async def resolve_telegram_post_link(bot, link: str):
-    link = link.strip()
-
-    m = PRIVATE_LINK_RE.match(link)
+def parse_message_link(link):
+    m = re.fullmatch(r"https?://t\.me/c/(\d+)/(\d+)", link.strip())
     if m:
-        internal_id = m.group(1)
-        message_id = int(m.group(2))
-        channel_id = int(f"-100{internal_id}")
-        return channel_id, message_id
+        return int("-100" + m.group(1)), int(m.group(2))
 
-    m = PUBLIC_LINK_RE.match(link)
+    m = re.fullmatch(r"https?://t\.me/([^/]+)/(\d+)", link.strip())
     if m:
-        username = m.group(1)
-        message_id = int(m.group(2))
-        chat = await bot.get_chat(f"@{username}")
-        return int(chat.id), message_id
-
+        return m.group(1), int(m.group(2))
     return None
 
 
 async def batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if uid != OWNER_ID and not db.is_admin(uid):
+        return await update.message.reply_text("❌ You are not authorized.")
+
+    if len(context.args) != 2:
+        return await update.message.reply_text(
+            "Usage:\n/batch (first_db_file_link) (last_db_file_link)"
+        )
+
+    first = parse_message_link(context.args[0])
+    last = parse_message_link(context.args[1])
+    if not first or not last:
+        return await update.message.reply_text("❌ Invalid Telegram post link.")
+
+    # Resolve public DB-channel links too.
+    try:
+        first_chat = await context.bot.get_chat(first[0]) if isinstance(first[0], str) else None
+        last_chat = await context.bot.get_chat(last[0]) if isinstance(last[0], str) else None
+        first_channel = first_chat.id if first_chat else first[0]
+        last_channel = last_chat.id if last_chat else last[0]
+    except Exception:
+        return await update.message.reply_text("❌ Could not resolve the DB channel link.")
+
+    first_msg, last_msg = first[1], last[1]
+    if first_channel != DB_CHANNEL_ID or last_channel != DB_CHANNEL_ID:
+        return await update.message.reply_text(
+            "❌ Both links must be posts from the configured DB channel."
+        )
+
+    lo, hi = sorted((first_msg, last_msg))
+    rows = db.list_files_between(DB_CHANNEL_ID, lo, hi)
+    if not rows:
+        return await update.message.reply_text(
+            "❌ No DB files found between those two posts."
+        )
+
+    batch_id = db.create_batch([r["file_id"] for r in rows])
+    token = db.create_token(uid, f"batch:{batch_id}", hours=2)
+    url = token_link(token)
+
+    await update.message.reply_text(
+        f"✅ <b>Batch link generated</b>\n\n"
+        f"Files: <b>{len(rows)}</b>\n\n{url}",
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+
+async def send_download_page(message, short_url):
+    image = start_image()
+    caption = (
+        "<b>HEY BRO/SIS,</b>\n\n"
+        "➤ <b>YOUR LINK IS READY, KINDLY CLICK ON\n"
+        "DOWNLOAD BUTTON! 👇</b>\n\n"
+        "TO BUY PREMIUM, CONTACT: "
+        "<a href=\"https://t.me/Its_Lozo\">@Its_Lozo</a>"
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("• CLICK HERE TO DOWNLOAD •", url=short_url)],
+        [
+            InlineKeyboardButton("PREMIUM", url="https://t.me/PremiumHub094"),
+            InlineKeyboardButton("TUTORIAL", url="https://t.me/Tutorial_Hub_94/4"),
+        ],
+    ])
+
+    if image:
+        try:
+            await message.reply_photo(
+                photo=image,
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )
+            return
+        except Exception:
+            log.exception("Could not send download-page image")
+
+    await message.reply_text(caption, parse_mode="HTML", reply_markup=keyboard)
+
+
+async def deliver_target(update, target):
+    if target.startswith("message:"):
+        _, chat_id, message_id = target.split(":", 2)
+        try:
+            await context_bot_copy(update, int(chat_id), int(message_id))
+        except Exception:
+            await update.message.reply_text(
+                "❌ I could not access the original message anymore."
+            )
+        return
+
+    if target.startswith("batch:"):
+        batch_id = target.split(":", 1)[1]
+        rows = db.get_batch_items(batch_id)
+        if not rows:
+            return await update.message.reply_text("❌ Batch not found.")
+        for row in rows:
+            try:
+                await context_bot_copy(update, row["channel_id"], row["message_id"])
+                await asyncio.sleep(0.15)
+            except Exception:
+                log.exception("Batch item delivery failed")
+        return
+
+    await update.message.reply_text("❌ Invalid link target.")
+
+
+async def context_bot_copy(update, chat_id, message_id):
+    await update.get_bot().copy_message(
+        chat_id=update.effective_chat.id,
+        from_chat_id=chat_id,
+        message_id=message_id,
+    )
+
+
+async def verify(update: Update, context: ContextTypes.DEFAULT_TYPE, token):
+    uid = update.effective_user.id
+
+    # FSUB always comes first: premium never bypasses FSUB.
+    missing = await is_fsub_member(context.bot, uid)
+    if missing:
+        await update.message.reply_text(
+            "⚡ <b>JOIN REQUIRED</b>\n\n"
+            "Join all required channels first, then tap <b>CHECK JOIN</b>.",
+            parse_mode="HTML",
+            reply_markup=fsub_keyboard(missing),
+        )
+        return
+
+    consumed = db.consume_token(token)
+    if not consumed:
+        return await update.message.reply_text(
+            "❌ This link is expired or already used."
+        )
+
+    _, target = consumed
+
+    # Premium bypasses ONLY the shortener.
+    if db.is_premium(uid):
+        await deliver_target(update, target)
+        return
+
+    short_url = shortener.create(uid, target, BOT_USERNAME)
+    if not short_url:
+        return await update.message.reply_text(
+            "⚠️ Shortener is not configured correctly."
+        )
+
+    await send_download_page(update.message, short_url)
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     db.add_user(user.id, user.username or "", user.first_name or "")
 
     if db.is_banned(user.id):
-        await update.effective_message.reply_text("🚫 You are banned.")
-        return
+        return await update.message.reply_text("🚫 You are banned from using this bot.")
 
-    if not db.is_admin(user.id):
-        await update.effective_message.reply_text("❌ Admin only.")
-        return
+    if context.args and context.args[0].startswith("verify_"):
+        return await verify(update, context, context.args[0][7:])
 
-    if len(context.args) != 2:
-        await update.effective_message.reply_text(
-            "Use exactly:\n\n"
-            "/batch (first_db_file_link) (last_db_file_link)\n\n"
-            "Example:\n"
-            "/batch https://t.me/c/1234567890/100 https://t.me/c/1234567890/120"
-        )
-        return
+    await render_start(update.message)
 
-    first = await resolve_telegram_post_link(context.bot, context.args[0])
-    last = await resolve_telegram_post_link(context.bot, context.args[1])
 
-    if not first or not last:
-        await update.effective_message.reply_text("❌ Invalid Telegram post link.")
-        return
+async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-    first_channel, first_message = first
-    last_channel, last_message = last
-
-    if first_channel != last_channel:
-        await update.effective_message.reply_text(
-            "❌ First and last DB file links must belong to the same channel."
-        )
-        return
-
-    if first_message > last_message:
-        await update.effective_message.reply_text(
-            "❌ First link message ID must be smaller than the last link message ID."
-        )
-        return
-
-    first_row = db.get_file_by_message(first_channel, first_message)
-    last_row = db.get_file_by_message(last_channel, last_message)
-
-    if not first_row or not last_row:
-        await update.effective_message.reply_text(
-            "❌ Both links must point to files that already exist in the DB."
-        )
-        return
-
-    rows = db.get_files_between(
-        first_channel,
-        first_message,
-        last_message,
-    )
-
-    if not rows:
-        await update.effective_message.reply_text("❌ No DB files found between these posts.")
-        return
-
-    file_ids = [row["file_id"] for row in rows]
-    batch_id = db.create_batch(file_ids)
-
-    token = db.create_token(user.id, f"batch:{batch_id}", hours=2)
-    deep_link = make_bot_deeplink(token)
-
-    if db.is_premium(user.id):
-        final_url = deep_link
-    else:
+    if query.data == "close":
         try:
-            final_url = await shorten_url(deep_link)
-        except Exception as exc:
-            log.exception("Batch shortener failed: %s", exc)
-            await update.effective_message.reply_text(
-                "❌ Shortener error.\n\nCheck AROLINKS_API_URL / AROLINKS_TOKEN."
-            )
-            return
+            await query.message.delete()
+        except Exception:
+            pass
+        return
 
-    await send_link_result(
-        update,
-        "🇮🇳 <b>HEY BRO/SIS,</b>\n\n"
-        "👇 <b>YOUR LINK IS READY, KINDLY CLICK ON DOWNLOAD BUTTON! 👇</b>\n\n"
-        "<b>TO BUY PREMIUM, CONTACT: @Its_Lozo</b>",
-        final_url,
+    if query.data == "about":
+        await edit_about(query)
+        return
+
+    if query.data == "back":
+        await edit_start(query)
+        return
+
+    if query.data == "check_fsub":
+        missing = await is_fsub_member(context.bot, query.from_user.id)
+        if missing:
+            await query.answer(
+                "❌ You still need to join all required channels.",
+                show_alert=True,
+            )
+        else:
+            await query.answer("✅ FSUB completed.")
+            await query.message.reply_text(
+                "✅ Subscription check passed. Open your file link again."
+            )
+        return
+
+
+async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if uid != OWNER_ID and not db.is_admin(uid):
+        return await update.message.reply_text("❌ You are not authorized.")
+
+    await update.message.reply_text(
+        "<b>⚙️ SETTINGS</b>\n\n"
+        "🖼️ Start Image\n"
+        "Reply to any photo with <code>/setimage</code> to set it as the bot's "
+        "start/download-page image.\n\n"
+        "The image is saved in Supabase settings; no image URL variable is required.",
+        parse_mode="HTML",
     )
 
 
-# ============================================================
-# OPTIONAL ADMIN COMMANDS
-# ============================================================
+async def setimage(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if uid != OWNER_ID and not db.is_admin(uid):
+        return
 
-async def addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not db.is_admin(update.effective_user.id):
-        await update.effective_message.reply_text("❌ Admin only.")
+    replied = update.message.reply_to_message
+    if not replied or not replied.photo:
+        return await update.message.reply_text(
+            "Reply to a photo and use /setimage."
+        )
+
+    db.set_setting("start_image", replied.photo[-1].file_id)
+    await update.message.reply_text("✅ Start image updated.")
+
+
+async def addfsub(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if uid != OWNER_ID and not db.is_admin(uid):
+        return
+    if len(context.args) < 2:
+        return await update.message.reply_text(
+            "Usage:\n/addfsub <channel_id> <invite_link> [title]"
+        )
+    channel_id, invite = context.args[0], context.args[1]
+    title = " ".join(context.args[2:]) or channel_id
+    db.add_fsub(channel_id, invite, title)
+    await update.message.reply_text("✅ FSUB channel added.")
+
+
+async def delfsub(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if uid != OWNER_ID and not db.is_admin(uid):
         return
     if not context.args:
-        await update.effective_message.reply_text("Use /addadmin USER_ID")
-        return
-    try:
-        db.add_admin(int(context.args[0]))
-        await update.effective_message.reply_text("✅ Admin added.")
-    except ValueError:
-        await update.effective_message.reply_text("❌ Invalid user ID.")
-
-
-async def deladmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not db.is_admin(update.effective_user.id):
-        await update.effective_message.reply_text("❌ Admin only.")
-        return
-    if not context.args:
-        await update.effective_message.reply_text("Use /deladmin USER_ID")
-        return
-    try:
-        db.remove_admin(int(context.args[0]))
-        await update.effective_message.reply_text("✅ Admin removed.")
-    except ValueError:
-        await update.effective_message.reply_text("❌ Invalid user ID.")
+        return await update.message.reply_text("Usage: /delfsub <channel_id>")
+    db.del_fsub(context.args[0])
+    await update.message.reply_text("✅ FSUB channel removed.")
 
 
 async def premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not db.is_admin(update.effective_user.id):
-        await update.effective_message.reply_text("❌ Admin only.")
+    uid = update.effective_user.id
+    if uid != OWNER_ID and not db.is_admin(uid):
         return
-    if len(context.args) != 2:
-        await update.effective_message.reply_text("Use /premium USER_ID DAYS")
-        return
+    if len(context.args) < 2:
+        return await update.message.reply_text("Usage: /premium <user_id> <days>")
     try:
-        uid = int(context.args[0])
-        days = int(context.args[1])
-        expires = db.add_premium(uid, days)
-        await update.effective_message.reply_text(
-            f"✅ Premium activated.\nUser: `{uid}`\nExpires: `{expires.isoformat()}`",
-            parse_mode="Markdown",
+        expiry = db.add_premium(int(context.args[0]), int(context.args[1]))
+        await update.message.reply_text(
+            f"✅ Premium active until {expiry.isoformat()}"
         )
-    except ValueError:
-        await update.effective_message.reply_text("❌ Invalid user ID or days.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ {e}")
 
 
 async def unpremium(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not db.is_admin(update.effective_user.id):
-        await update.effective_message.reply_text("❌ Admin only.")
+    uid = update.effective_user.id
+    if uid != OWNER_ID and not db.is_admin(uid):
         return
     if not context.args:
-        await update.effective_message.reply_text("Use /unpremium USER_ID")
+        return await update.message.reply_text("Usage: /unpremium <user_id>")
+    db.remove_premium(int(context.args[0]))
+    await update.message.reply_text("✅ Premium removed.")
+
+
+async def channel_post_indexer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    post = update.channel_post
+    if not post or post.chat_id != DB_CHANNEL_ID:
         return
     try:
-        db.remove_premium(int(context.args[0]))
-        await update.effective_message.reply_text("✅ Premium removed.")
-    except ValueError:
-        await update.effective_message.reply_text("❌ Invalid user ID.")
-
-
-# ============================================================
-# STARTUP
-# ============================================================
-
-async def post_init(application: Application):
-    global BOT_USERNAME
-    if not BOT_USERNAME:
-        me = await application.bot.get_me()
-        BOT_USERNAME = me.username or ""
-    log.info("Bot started as @%s", BOT_USERNAME)
+        caption = post.caption or post.text or ""
+        db.add_file(DB_CHANNEL_ID, post.message_id, caption)
+    except Exception:
+        log.exception("Could not index DB channel post")
 
 
 def main():
-    threading.Thread(target=start_health_server, daemon=True).start()
-
-    app = (
-        ApplicationBuilder()
-        .token(BOT_TOKEN)
-        .post_init(post_init)
-        .build()
-    )
+    app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("genlink", genlink))
     app.add_handler(CommandHandler("batch", batch))
-    app.add_handler(CommandHandler("addadmin", addadmin))
-    app.add_handler(CommandHandler("deladmin", deladmin))
+    app.add_handler(CommandHandler("settings", settings))
+    app.add_handler(CommandHandler("setimage", setimage))
+    app.add_handler(CommandHandler("addfsub", addfsub))
+    app.add_handler(CommandHandler("delfsub", delfsub))
     app.add_handler(CommandHandler("premium", premium))
     app.add_handler(CommandHandler("unpremium", unpremium))
-    app.add_handler(CallbackQueryHandler(callbacks))
+    app.add_handler(CallbackQueryHandler(callback))
 
-    # Pending deletion worker.
-    app.job_queue.run_repeating(process_pending_deletes, interval=15, first=15)
+    # Receives channel_post updates and indexes the configured DB channel.
+    app.add_handler(
+        MessageHandler(filters.ALL, channel_post_indexer),
+        group=10,
+    )
 
-    log.info("Starting polling...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    log.info("Bot starting")
+    # One long-polling instance only. Do NOT run the same bot token in UptimeRobot.
+    app.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True,
+        close_loop=False,
+    )
 
 
 if __name__ == "__main__":

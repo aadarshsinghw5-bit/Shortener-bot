@@ -20,6 +20,12 @@ logging.basicConfig(
     level=logging.INFO,
 )
 log = logging.getLogger("file-store-bot")
+# Never expose Telegram Bot API URLs (they contain the bot token).
+# httpx/httpcore INFO logging can print the full request URL.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("telegram.ext").setLevel(logging.WARNING)
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 BOT_USERNAME = os.environ["BOT_USERNAME"].lstrip("@")

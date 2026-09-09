@@ -2,6 +2,8 @@ import os
 import logging
 import asyncio
 import re
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
@@ -34,6 +36,24 @@ DB_CHANNEL_ID = int(os.environ["DB_CHANNEL_ID"])
 
 db = Database()
 shortener = Shortener(db)
+
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"Bot is running!")
+
+    def log_message(self, format, *args):
+        return
+
+
+def start_health_server():
+    port = int(os.environ.get("PORT", "10000"))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    log.info("Health server running on port %s", port)
+    server.serve_forever()
 
 
 def start_image():
@@ -489,6 +509,7 @@ async def channel_post_indexer(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 def main():
+    threading.Thread(target=start_health_server, daemon=True).start()
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))

@@ -1,23 +1,9 @@
 services:
-  - type: worker
+  - type: web
     name: file-store-bot
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: python -u bot.py
     envVars:
-      - key: BOT_TOKEN
-        sync: false
-      - key: BOT_USERNAME
-        sync: false
-      - key: OWNER_ID
-        sync: false
-      - key: DB_CHANNEL_ID
-        sync: false
-      - key: SUPABASE_URL
-        sync: false
-      - key: SUPABASE_KEY
-        sync: false
-      - key: SHORTENER_API_URL
-        value: https://arolinks.com/api
-      - key: SHORTENER_API_KEY
-        sync: false
+      - key: PORT
+        value: "10000"

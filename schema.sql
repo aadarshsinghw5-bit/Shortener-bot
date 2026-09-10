@@ -29,12 +29,6 @@ create table if not exists files (
     unique(channel_id, message_id)
 );
 
-create table if not exists main_links (
-    token text primary key,
-    target text not null,
-    created_at timestamptz not null default now()
-);
-
 create table if not exists batches (
     batch_id text primary key,
     created_at timestamptz not null default now()
@@ -45,6 +39,12 @@ create table if not exists batch_items (
     file_id text not null references files(file_id) on delete cascade,
     position integer not null,
     primary key(batch_id, file_id)
+);
+
+create table if not exists main_links (
+    token text primary key,
+    target text not null,
+    created_at timestamptz not null default now()
 );
 
 create table if not exists tokens (
@@ -67,3 +67,5 @@ create table if not exists settings (
     key text primary key,
     value text
 );
+
+insert into settings(key,value) values ('auto_delete_minutes','10') on conflict (key) do nothing;

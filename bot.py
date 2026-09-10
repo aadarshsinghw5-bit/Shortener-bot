@@ -3,13 +3,14 @@ import logging
 import asyncio
 import re
 import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from datetime import datetime, timezone
 from urllib.parse import quote
 
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 from telegram.constants import ChatMemberStatus
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
 
 from database import Database
 from shortener import Shortener
@@ -17,10 +18,8 @@ from shortener import Shortener
 load_dotenv()
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(name)s | %(message)s", level=logging.INFO)
 log = logging.getLogger("file-store-bot")
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
-logging.getLogger("telegram").setLevel(logging.WARNING)
-logging.getLogger("telegram.ext").setLevel(logging.WARNING)
+for name in ("httpx", "httpcore", "telegram", "telegram.ext"):
+    logging.getLogger(name).setLevel(logging.WARNING)
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 BOT_USERNAME = os.environ["BOT_USERNAME"].lstrip("@")
@@ -29,9 +28,10 @@ DB_CHANNEL_ID = int(os.environ["DB_CHANNEL_ID"])
 
 db = Database()
 shortener = Shortener(db)
-
-# In-memory pending settings actions. These are intentionally short-lived UI states.
-pending_actions = {}
+_pending_image = set()
+_pending_autodelete = set()
+_pending_admin = set()
+_pending_fsub = set()
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -40,14 +40,13 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.end_headers()
         self.wfile.write(b'{"ok":true,"service":"telegram-file-store-bot"}')
-
     def log_message(self, format, *args):
         return
 
 
 def start_health_server():
     port = int(os.environ.get("PORT", "10000"))
-    server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
     log.info("Health server running on port %s", port)
     server.serve_forever()
 
@@ -61,16 +60,16 @@ def start_caption():
         "<i>ʜɪ ᴛʜᴇʀᴇ....! 💥</i>\n\n"
         "ɪ ᴀᴍ ᴀ ꜰɪʟᴇ-ꜱᴛᴏʀᴇ ʙᴏᴛ.\n"
         "ɪ ᴄᴀɴ ɢᴇɴᴇʀᴀᴛᴇ ʟɪɴᴋꜱ ᴅɪʀᴇᴄᴛʟʏ ᴡɪᴛʜ ɴᴏ ᴘʀᴏʙʟᴇᴍꜱ.\n\n"
-        '<b>ᴍʏ ᴏᴡɴᴇʀ:</b> <a href="https://t.me/Its_Lozo">@ɪᴛꜱ_ʟᴏᴢᴏ</a>'
+        "<b>ᴍʏ ᴏᴡɴᴇʀ:</b> <a href=\"https://t.me/Its_Lozo\">@ɪᴛꜱ_ʟᴏᴢᴏ</a>"
     )
 
 
 def about_caption():
     return (
-        "<i>ᴀʙᴏᴜᴛ ᴜꜱ..</i>\n\n"
-        '➤ ᴍᴀᴅᴇ ꜰᴏʀ : <a href="https://t.me/Anime_Hub_94">ᴀɴɪᴍᴇ ʜᴜʙ</a>\n'
-        '➤ ᴏᴡɴᴇʀ : <a href="https://t.me/Its_Lozo">@ɪᴛꜱ_ʟᴏᴢᴏ</a>\n'
-        '➤ ᴅᴇᴠᴇʟᴏᴘᴇʀ : <a href="https://t.me/Its_Lozo">@ɪᴛꜱ_ʟᴏᴢᴏ</a>\n\n'
+        "<b>ᴀʙᴏᴜᴛ ᴜꜱ..</b>\n\n"
+        "➤ ᴍᴀᴅᴇ ꜰᴏʀ : <a href=\"https://t.me/Anime_Hub_94\">ᴀɴɪᴍᴇ ʜᴜʙ</a>\n"
+        "➤ ᴏᴡɴᴇʀ : <a href=\"https://t.me/Its_Lozo\">@ɪᴛꜱ_ʟᴏᴢᴏ</a>\n"
+        "➤ ᴅᴇᴠᴇʟᴏᴘᴇʀ : <a href=\"https://t.me/Its_Lozo\">@ɪᴛꜱ_ʟᴏᴢᴏ</a>\n\n"
         "ᴀᴅɪᴏꜱ !!"
     )
 
@@ -101,9 +100,9 @@ async def edit_start(query):
             await query.edit_message_media(media=InputMediaPhoto(media=image, caption=start_caption(), parse_mode="HTML"), reply_markup=start_keyboard())
             return
         except Exception:
-            log.exception("Could not restore start image")
+            pass
     try:
-        await query.edit_message_text(text=start_caption(), parse_mode="HTML", reply_markup=start_keyboard())
+        await query.edit_message_text(start_caption(), parse_mode="HTML", reply_markup=start_keyboard())
     except Exception:
         pass
 
@@ -112,7 +111,7 @@ async def edit_about(query):
     try:
         await query.edit_message_caption(caption=about_caption(), parse_mode="HTML", reply_markup=about_keyboard())
     except Exception:
-        await query.edit_message_text(text=about_caption(), parse_mode="HTML", reply_markup=about_keyboard())
+        await query.edit_message_text(about_caption(), parse_mode="HTML", reply_markup=about_keyboard())
 
 
 async def is_fsub_member(bot, user_id):
@@ -136,44 +135,44 @@ def fsub_keyboard(rows):
     return InlineKeyboardMarkup(buttons)
 
 
-def main_link(token):
-    return f"https://t.me/{BOT_USERNAME}?start={token}"
+def main_link_url(token):
+    return f"https://t.me/{BOT_USERNAME}?start=link_{token}"
 
 
 def share_url(url):
     return f"https://t.me/share/url?url={quote(url, safe='')}"
 
 
-def share_keyboard(url):
-    return InlineKeyboardMarkup([[InlineKeyboardButton("↗ ꜱʜᴀʀᴇ ᴜʀʟ", url=share_url(url))]])
-
-
-def auth(uid):
+def admin_ok(uid):
     return uid == OWNER_ID or db.is_admin(uid)
+
+
+def settings_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🖼️ ꜱᴇᴛ ɪᴍᴀɢᴇ", callback_data="set_image"), InlineKeyboardButton("🗑️ ᴀᴜᴛᴏ ᴅᴇʟᴇᴛᴇ", callback_data="auto_delete")],
+        [InlineKeyboardButton("👮 ᴀᴅᴍɪɴꜱ", callback_data="admins"), InlineKeyboardButton("📢 ꜰꜱᴜʙ", callback_data="fsub")],
+        [InlineKeyboardButton("✖️ ᴄʟᴏꜱᴇ", callback_data="settings_close")],
+    ])
 
 
 async def genlink(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if not auth(uid):
+    if not admin_ok(uid):
         return await update.message.reply_text("❌ ʏᴏᴜ ᴀʀᴇ ɴᴏᴛ ᴀᴜᴛʜᴏʀɪᴢᴇᴅ.")
     replied = update.message.reply_to_message
     if not replied:
-        return await update.message.reply_text("ʀᴇᴘʟʏ ᴛᴏ ᴀ ᴍᴇꜱꜱᴀɢᴇ/ꜰɪʟᴇ ᴀɴᴅ ᴜꜱᴇ /ɢᴇɴʟɪɴᴋ.")
-
+        return await update.message.reply_text("ʀᴇᴘʟʏ ᴛᴏ ᴀɴʏ ᴍᴇꜱꜱᴀɢᴇ ᴀɴᴅ ᴜꜱᴇ /ɢᴇɴʟɪɴᴋ.")
     try:
-        copied = await context.bot.copy_message(chat_id=DB_CHANNEL_ID, from_chat_id=replied.chat_id, message_id=replied.message_id)
-        file_id = db.add_file(DB_CHANNEL_ID, copied.message_id, copied.caption or copied.text or "")
-        token = db.create_main_link(f"file:{file_id}")
-        url = main_link(token)
-        await context.bot.edit_message_reply_markup(chat_id=DB_CHANNEL_ID, message_id=copied.message_id, reply_markup=share_keyboard(url))
+        main = db.create_main_link("pending")
+        url = main_link_url(main)
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("↗ ꜱʜᴀʀᴇ ᴜʀʟ", url=share_url(url))]])
+        copied = await context.bot.copy_message(chat_id=DB_CHANNEL_ID, from_chat_id=replied.chat_id, message_id=replied.message_id, reply_markup=markup)
+        target = f"message:{DB_CHANNEL_ID}:{copied.message_id}"
+        db.db.table("main_links").update({"target": target}).eq("token", main).execute()
+        await update.message.reply_text(f"✅ <b>ɢᴇɴʟɪɴᴋ ɢᴇɴᴇʀᴀᴛᴇᴅ</b>\n\n{url}", parse_mode="HTML", disable_web_page_preview=True, reply_markup=markup)
     except Exception:
-        log.exception("genlink failed")
-        return await update.message.reply_text("❌ ɢᴇɴʟɪɴᴋ ɢᴇɴᴇʀᴀᴛɪᴏɴ ꜰᴀɪʟᴇᴅ. ᴍᴀᴋᴇ ꜱᴜʀᴇ ᴛʜᴇ ʙᴏᴛ ɪꜱ ᴀᴅᴍɪɴ ɪɴ ᴛʜᴇ ᴅʙ ᴄʜᴀɴɴᴇʟ.")
-
-    await update.message.reply_text(
-        f"✅ <b>ɢᴇɴʟɪɴᴋ ʀᴇᴀᴅʏ</b>\n\n{url}",
-        parse_mode="HTML", disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↗ ꜱʜᴀʀᴇ ᴜʀʟ", url=share_url(url))]])
-    )
+        log.exception("Genlink failed")
+        await update.message.reply_text("❌ ɢᴇɴʟɪɴᴋ ɢᴇɴᴇʀᴀᴛᴇ ɴᴀʜɪ ʜᴜᴀ.")
 
 
 def parse_message_link(link):
@@ -188,52 +187,42 @@ def parse_message_link(link):
 
 async def batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if not auth(uid):
+    if not admin_ok(uid):
         return await update.message.reply_text("❌ ʏᴏᴜ ᴀʀᴇ ɴᴏᴛ ᴀᴜᴛʜᴏʀɪᴢᴇᴅ.")
     if len(context.args) != 2:
-        return await update.message.reply_text("ᴜꜱᴀɢᴇ:\n/ʙᴀᴛᴄʜ <ꜰɪʀꜱᴛ_ᴅʙ_ʟɪɴᴋ> <ʟᴀꜱᴛ_ᴅʙ_ʟɪɴᴋ>")
-
-    first = parse_message_link(context.args[0]); last = parse_message_link(context.args[1])
+        return await update.message.reply_text("ᴜꜱᴀɢᴇ:\n/ʙᴀᴛᴄʜ <ꜰɪʀꜱᴛ ᴅʙ ʟɪɴᴋ> <ʟᴀꜱᴛ ᴅʙ ʟɪɴᴋ>")
+    first, last = parse_message_link(context.args[0]), parse_message_link(context.args[1])
     if not first or not last:
         return await update.message.reply_text("❌ ɪɴᴠᴀʟɪᴅ ᴛᴇʟᴇɢʀᴀᴍ ᴘᴏꜱᴛ ʟɪɴᴋ.")
     try:
-        first_chat = await context.bot.get_chat(first[0]) if isinstance(first[0], str) else None
-        last_chat = await context.bot.get_chat(last[0]) if isinstance(last[0], str) else None
-        first_channel = first_chat.id if first_chat else first[0]
-        last_channel = last_chat.id if last_chat else last[0]
+        first_channel = (await context.bot.get_chat(first[0])).id if isinstance(first[0], str) else first[0]
+        last_channel = (await context.bot.get_chat(last[0])).id if isinstance(last[0], str) else last[0]
     except Exception:
-        return await update.message.reply_text("❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ʀᴇꜱᴏʟᴠᴇ ᴛʜᴇ ᴅʙ ᴄʜᴀɴɴᴇʟ ʟɪɴᴋ.")
+        return await update.message.reply_text("❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ʀᴇꜱᴏʟᴠᴇ ᴛʜᴇ ᴅʙ ᴄʜᴀɴɴᴇʟ.")
     if first_channel != DB_CHANNEL_ID or last_channel != DB_CHANNEL_ID:
-        return await update.message.reply_text("❌ ʙᴏᴛʜ ʟɪɴᴋꜱ ᴍᴜꜱᴛ ʙᴇ ᴘᴏꜱᴛꜱ ꜰʀᴏᴍ ᴛʜᴇ ᴄᴏɴꜰɪɢᴜʀᴇᴅ ᴅʙ ᴄʜᴀɴɴᴇʟ.")
-
+        return await update.message.reply_text("❌ ʙᴏᴛʜ ʟɪɴᴋꜱ ᴍᴜꜱᴛ ʙᴇ ꜰʀᴏᴍ ᴛʜᴇ ᴅʙ ᴄʜᴀɴɴᴇʟ.")
     lo, hi = sorted((first[1], last[1]))
     rows = db.list_files_between(DB_CHANNEL_ID, lo, hi)
     if not rows:
-        return await update.message.reply_text("❌ ɴᴏ ᴅʙ ᴘᴏꜱᴛꜱ ꜰᴏᴜɴᴅ ʙᴇᴛᴡᴇᴇɴ ᴛʜᴇꜱᴇ ʟɪɴᴋꜱ.")
+        return await update.message.reply_text("❌ ɴᴏ ᴅʙ ᴘᴏꜱᴛꜱ ꜰᴏᴜɴᴅ ɪɴ ᴛʜɪꜱ ʀᴀɴɢᴇ.")
     batch_id = db.create_batch([r["file_id"] for r in rows])
-    token = db.create_main_link(f"batch:{batch_id}")
-    url = main_link(token)
-
-    # Put the batch share URL under every post in the selected range.
-    for row in rows:
-        try:
-            await context.bot.edit_message_reply_markup(chat_id=DB_CHANNEL_ID, message_id=row["message_id"], reply_markup=share_keyboard(url))
-        except Exception:
-            log.exception("Could not add batch share button to post %s", row["message_id"])
-
-    await update.message.reply_text(
-        f"✅ <b>ʙᴀᴛᴄʜ ʟɪɴᴋ ʀᴇᴀᴅʏ</b>\n\n📦 ɪᴛᴇᴍꜱ: <b>{len(rows)}</b>\n\n{url}",
-        parse_mode="HTML", disable_web_page_preview=True,
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↗ ꜱʜᴀʀᴇ ᴜʀʟ", url=share_url(url))]])
-    )
+    main = db.create_main_link(f"batch:{batch_id}")
+    url = main_link_url(main)
+    markup = InlineKeyboardMarkup([[InlineKeyboardButton("↗ ꜱʜᴀʀᴇ ᴜʀʟ", url=share_url(url))]])
+    try:
+        await context.bot.send_message(DB_CHANNEL_ID, "📦 <b>ʙᴀᴛᴄʜ ꜱʜᴀʀᴇ ᴜʀʟ</b>", parse_mode="HTML", reply_markup=markup)
+    except Exception:
+        pass
+    await update.message.reply_text(f"✅ <b>ʙᴀᴛᴄʜ ʟɪɴᴋ ɢᴇɴᴇʀᴀᴛᴇᴅ</b>\n\nɪᴛᴇᴍꜱ: <b>{len(rows)}</b>\n\n{url}", parse_mode="HTML", disable_web_page_preview=True, reply_markup=markup)
 
 
 async def send_download_page(message, short_url):
     image = start_image()
     caption = (
-        "<b>📊 ʜᴇʏ ʙʀᴏ/ꜱɪꜱ,</b>\n\n"
-        "➜ <b>ʏᴏᴜʀ ʟɪɴᴋ ɪꜱ ʀᴇᴀᴅʏ, ᴋɪɴᴅʟʏ ᴄʟɪᴄᴋ ᴏɴ\nᴅᴏᴡɴʟᴏᴀᴅ ʙᴜᴛᴛᴏɴ! 👇</b>\n\n"
-        'ᴛᴏ ʙᴜʏ ᴘʀᴇᴍɪᴜᴍ, ᴄᴏɴᴛᴀᴄᴛ: <a href="https://t.me/Its_Lozo">@ɪᴛꜱ_ʟᴏᴢᴏ</a>'
+        "<i>📊 ʜᴇʏ ʙʀᴏ/ꜱɪꜱ,</i>\n\n"
+        "➜ ʏᴏᴜʀ ʟɪɴᴋ ɪꜱ ʀᴇᴀᴅʏ, ᴋɪɴᴅʟʏ ᴄʟɪᴄᴋ ᴏɴ\n"
+        "ᴅᴏᴡɴʟᴏᴀᴅ ʙᴜᴛᴛᴏɴ! 👇\n\n"
+        "ᴛᴏ ʙᴜʏ ᴘʀᴇᴍɪᴜᴍ, ᴄᴏɴᴛᴀᴄᴛ: <a href=\"https://t.me/Its_Lozo\">@ɪᴛꜱ_ʟᴏᴢᴏ</a>"
     )
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("• ᴄʟɪᴄᴋ ʜᴇʀᴇ ᴛᴏ ᴅᴏᴡɴʟᴏᴀᴅ •", url=short_url)],
@@ -244,216 +233,201 @@ async def send_download_page(message, short_url):
             await message.reply_photo(photo=image, caption=caption, parse_mode="HTML", reply_markup=keyboard)
             return
         except Exception:
-            log.exception("Could not send download page image")
+            pass
     await message.reply_text(caption, parse_mode="HTML", reply_markup=keyboard)
 
 
 async def deliver_target(update, target):
-    if target.startswith("file:"):
-        row = db.get_file(target.split(":", 1)[1])
-        if not row:
-            return await update.message.reply_text("❌ ꜰɪʟᴇ ɴᴏᴛ ꜰᴏᴜɴᴅ.")
-        try:
-            await update.get_bot().copy_message(chat_id=update.effective_chat.id, from_chat_id=row["channel_id"], message_id=row["message_id"])
-        except Exception:
-            log.exception("File delivery failed")
-            await update.message.reply_text("❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ᴅᴇʟɪᴠᴇʀ ᴛʜᴇ ꜰɪʟᴇ.")
-        return
-
-    if target.startswith("batch:"):
-        rows = db.get_batch_items(target.split(":", 1)[1])
+    delivered = []
+    if target.startswith("message:"):
+        _, chat_id, message_id = target.split(":", 2)
+        m = await update.get_bot().copy_message(chat_id=update.effective_chat.id, from_chat_id=int(chat_id), message_id=int(message_id))
+        delivered.append(m.message_id)
+    elif target.startswith("batch:"):
+        batch_id = target.split(":", 1)[1]
+        rows = db.get_batch_items(batch_id)
         if not rows:
-            return await update.message.reply_text("❌ ʙᴀᴛᴄʜ ɴᴏᴛ ꜰᴏᴜɴᴅ.")
+            await update.message.reply_text("❌ ʙᴀᴛᴄʜ ɴᴏᴛ ꜰᴏᴜɴᴅ.")
+            return []
         for row in rows:
             try:
-                await update.get_bot().copy_message(chat_id=update.effective_chat.id, from_chat_id=row["channel_id"], message_id=row["message_id"])
-                await asyncio.sleep(0.15)
+                m = await update.get_bot().copy_message(chat_id=update.effective_chat.id, from_chat_id=row["channel_id"], message_id=row["message_id"])
+                delivered.append(m.message_id)
+                await asyncio.sleep(0.08)
             except Exception:
                 log.exception("Batch item delivery failed")
-        return
+    else:
+        await update.message.reply_text("❌ ɪɴᴠᴀʟɪᴅ ʟɪɴᴋ ᴛᴀʀɢᴇᴛ.")
+    return delivered
 
-    await update.message.reply_text("❌ ɪɴᴠᴀʟɪᴅ ʟɪɴᴋ ᴛᴀʀɢᴇᴛ.")
+
+async def schedule_auto_delete(context, chat_id, message_ids, minutes):
+    if minutes <= 0 or not message_ids:
+        return
+    context.job_queue.run_once(delete_delivered, when=minutes * 60, data={"chat_id": chat_id, "message_ids": message_ids})
+
+
+async def delete_delivered(context):
+    data = context.job.data
+    for mid in data["message_ids"]:
+        try:
+            await context.bot.delete_message(data["chat_id"], mid)
+        except Exception:
+            pass
+
+
+def auto_delete_minutes():
+    try:
+        return max(0, int(db.get_setting("auto_delete_minutes", "10")))
+    except Exception:
+        return 10
+
+
+async def deliver_and_notify(update, context, target):
+    ids = await deliver_target(update, target)
+    if not ids:
+        return
+    mins = auto_delete_minutes()
+    if mins > 0:
+        notice = await update.message.reply_text(
+            f"⚠️ <b>ᴛʜɪꜱ ꜰɪʟᴇ ɪꜱ ᴅᴇʟᴇᴛɪɴɢ ᴀᴜᴛᴏᴍᴀᴛɪᴄᴀʟʟʏ ɪɴ {mins} ᴍɪɴᴜᴛᴇꜱ.</b>\n\nꜰᴏʀᴡᴀʀᴅ ɪᴛ ᴛᴏ ʏᴏᴜʀ ꜱᴀᴠᴇᴅ ᴍᴇꜱꜱᴀɢᴇꜱ..!"
+        )
+        ids.append(notice.message_id)
+        await schedule_auto_delete(context, update.effective_chat.id, ids, mins)
 
 
 async def verify(update, context, token):
     uid = update.effective_user.id
     missing = await is_fsub_member(context.bot, uid)
     if missing:
-        await update.message.reply_text("⚡ <b>ᴊᴏɪɴ ʀᴇǫᴜɪʀᴇᴅ</b>\n\nᴊᴏɪɴ ᴀʟʟ ʀᴇǫᴜɪʀᴇᴅ ᴄʜᴀɴɴᴇʟꜱ, ᴛʜᴇɴ ᴛᴀᴘ <b>ᴄʜᴇᴄᴋ ᴊᴏɪɴ</b>.", parse_mode="HTML", reply_markup=fsub_keyboard(missing))
-        return
+        return await update.message.reply_text("⚡ <b>ᴊᴏɪɴ ʀᴇǫᴜɪʀᴇᴅ</b>\n\nᴊᴏɪɴ ᴀʟʟ ʀᴇǫᴜɪʀᴇᴅ ᴄʜᴀɴɴᴇʟꜱ ᴛʜᴇɴ ᴛᴀᴘ ᴄʜᴇᴄᴋ ᴊᴏɪɴ.", parse_mode="HTML", reply_markup=fsub_keyboard(missing))
+    row = db.get_token(token)
+    if not row or int(row["user_id"]) != uid:
+        return await update.message.reply_text("❌ ᴛʜɪꜱ ꜱʜᴏʀᴛᴇɴᴇʀ ʟɪɴᴋ ɪꜱ ɴᴏᴛ ᴍᴀᴅᴇ ꜰᴏʀ ʏᴏᴜ.")
+    target = db.consume_token(token, uid)
+    if not target:
+        return await update.message.reply_text("❌ ᴛʜɪꜱ ꜱʜᴏʀᴛᴇɴᴇʀ ʟɪɴᴋ ɪꜱ ᴇxᴘɪʀᴇᴅ ᴏʀ ᴀʟʀᴇᴀᴅʏ ᴜꜱᴇᴅ.")
+    await deliver_and_notify(update, context, target)
 
-    session_target = db.consume_shortener_session(token, uid)
-    if not session_target:
-        return await update.message.reply_text("❌ ᴛʜɪꜱ ꜱʜᴏʀᴛᴇɴᴇʀ ʟɪɴᴋ ɪꜱ ᴇxᴘɪʀᴇᴅ, ᴀʟʀᴇᴀᴅʏ ᴜꜱᴇᴅ, ᴏʀ ʙᴇʟᴏɴɢꜱ ᴛᴏ ᴀɴᴏᴛʜᴇʀ ᴜꜱᴇʀ.")
-    await deliver_target(update, session_target)
+
+async def open_main(update, context, token):
+    uid = update.effective_user.id
+    row = db.get_main_link(token)
+    if not row:
+        return await update.message.reply_text("❌ ᴛʜɪꜱ ʟɪɴᴋ ɪꜱ ɴᴏᴛ ᴠᴀʟɪᴅ.")
+    missing = await is_fsub_member(context.bot, uid)
+    if missing:
+        return await update.message.reply_text("⚡ <b>ᴊᴏɪɴ ʀᴇǫᴜɪʀᴇᴅ</b>\n\nᴊᴏɪɴ ᴀʟʟ ʀᴇǫᴜɪʀᴇᴅ ᴄʜᴀɴɴᴇʟꜱ ᴛʜᴇɴ ᴛᴀᴘ ᴄʜᴇᴄᴋ ᴊᴏɪɴ.", parse_mode="HTML", reply_markup=fsub_keyboard(missing))
+    if db.is_premium(uid):
+        await deliver_and_notify(update, context, row["target"])
+        return
+    verify_token = db.create_token(uid, row["target"], hours=2)
+    short_url = shortener.create_from_token(verify_token, BOT_USERNAME)
+    if not short_url:
+        return await update.message.reply_text("⚠️ ꜱʜᴏʀᴛᴇɴᴇʀ ɪꜱ ɴᴏᴛ ᴄᴏɴꜰɪɢᴜʀᴇᴅ ᴄᴏʀʀᴇᴄᴛʟʏ.")
+    await send_download_page(update.message, short_url)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     db.add_user(user.id, user.username or "", user.first_name or "")
     if db.is_banned(user.id):
-        return await update.message.reply_text("🚫 ʏᴏᴜ ᴀʀᴇ ʙᴀɴɴᴇᴅ ꜰʀᴏᴍ ᴜꜱɪɴɢ ᴛʜɪꜱ ʙᴏᴛ.")
-
+        return await update.message.reply_text("🚫 ʏᴏᴜ ᴀʀᴇ ʙᴀɴɴᴇᴅ.")
     if context.args:
         arg = context.args[0]
         if arg.startswith("verify_"):
             return await verify(update, context, arg[7:])
-        ml = db.get_main_link(arg)
-        if ml:
-            target = ml["target"]
-            if db.is_premium(user.id):
-                missing = await is_fsub_member(context.bot, user.id)
-                if missing:
-                    return await update.message.reply_text("⚡ <b>ᴊᴏɪɴ ʀᴇǫᴜɪʀᴇᴅ</b>", parse_mode="HTML", reply_markup=fsub_keyboard(missing))
-                return await deliver_target(update, target)
-            missing = await is_fsub_member(context.bot, user.id)
-            if missing:
-                return await update.message.reply_text("⚡ <b>ᴊᴏɪɴ ʀᴇǫᴜɪʀᴇᴅ</b>\n\nᴊᴏɪɴ ᴀʟʟ ʀᴇǫᴜɪʀᴇᴅ ᴄʜᴀɴɴᴇʟꜱ, ᴛʜᴇɴ ᴛᴀᴘ <b>ᴄʜᴇᴄᴋ ᴊᴏɪɴ</b>.", parse_mode="HTML", reply_markup=fsub_keyboard(missing))
-            short_url = shortener.create(user.id, target, BOT_USERNAME)
-            if not short_url:
-                return await update.message.reply_text("⚠️ ꜱʜᴏʀᴛᴇɴᴇʀ ɪꜱ ɴᴏᴛ ᴄᴏɴꜰɪɢᴜʀᴇᴅ ᴄᴏʀʀᴇᴄᴛʟʏ.")
-            return await send_download_page(update.message, short_url)
-
+        if arg.startswith("link_"):
+            return await open_main(update, context, arg[5:])
     await render_start(update.message)
 
 
-async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-
-    if query.data == "close":
-        try: await query.message.delete()
+async def callback(update, context):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+    if q.data == "close" or q.data == "settings_close":
+        try: await q.message.delete()
         except Exception: pass
         return
-    if query.data == "about": return await edit_about(query)
-    if query.data == "back": return await edit_start(query)
-
-    if query.data == "check_fsub":
+    if q.data == "about": return await edit_about(q)
+    if q.data == "back": return await edit_start(q)
+    if q.data == "check_fsub":
         missing = await is_fsub_member(context.bot, uid)
-        if missing:
-            await query.answer("❌ ᴊᴏɪɴ ᴀʟʟ ᴄʜᴀɴɴᴇʟꜱ ꜰɪʀꜱᴛ.", show_alert=True)
-        else:
-            await query.message.delete()
-            await render_start(query.message.chat)
-        return
-
-    if not auth(uid):
-        return
-
-    if query.data == "settings":
-        await query.edit_message_text("<b>⚙️ ꜱᴇᴛᴛɪɴɢꜱ</b>\n\nᴄʜᴏᴏꜱᴇ ᴀ ꜱᴇᴛᴛɪɴɢ:", parse_mode="HTML", reply_markup=settings_keyboard())
-        return
-    if query.data == "setimage_ui":
-        pending_actions[uid] = "setimage"
-        await query.message.reply_text("🖼️ <b>ꜱᴇɴᴅ ᴀ ᴘʜᴏᴛᴏ ɴᴏᴡ.</b>\n\nᴛʜɪꜱ ᴡɪʟʟ ʙᴇ ᴜꜱᴇᴅ ᴀꜱ ᴛʜᴇ ꜱᴛᴀʀᴛ ᴀɴᴅ ᴅᴏᴡɴʟᴏᴀᴅ-ᴘᴀɢᴇ ɪᴍᴀɢᴇ.", parse_mode="HTML")
-        return
-    if query.data == "admins_ui":
-        lines = ["<b>👥 ᴀᴅᴍɪɴ ʟɪꜱᴛ</b>", "", f"👑 <a href=\"tg://user?id={OWNER_ID}\">ᴏᴡɴᴇʀ</a> — <code>{OWNER_ID}</code>"]
-        for row in db.list_admins():
-            aid = int(row["user_id"]); lines.append(f"• <a href=\"tg://user?id={aid}\">ᴀᴅᴍɪɴ</a> — <code>{aid}</code>")
-        await query.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ ᴀᴅᴅ ᴀᴅᴍɪɴ", callback_data="add_admin_ui"), InlineKeyboardButton("➖ ʀᴇᴍᴏᴠᴇ", callback_data="remove_admin_ui")],[InlineKeyboardButton("↩️ ʙᴀᴄᴋ", callback_data="settings")]]))
-        return
-    if query.data == "add_admin_ui":
-        pending_actions[uid] = "add_admin"
-        await query.message.reply_text("➕ <b>ꜱᴇɴᴅ ᴛʜᴇ ᴀᴅᴍɪɴ ᴜꜱᴇʀ ɪᴅ.</b>", parse_mode="HTML")
-        return
-    if query.data == "remove_admin_ui":
-        pending_actions[uid] = "remove_admin"
-        await query.message.reply_text("➖ <b>ꜱᴇɴᴅ ᴛʜᴇ ᴀᴅᴍɪɴ ᴜꜱᴇʀ ɪᴅ.</b>", parse_mode="HTML")
-        return
-    if query.data == "fsub_ui":
-        pending_actions[uid] = "add_fsub"
-        await query.message.reply_text("➕ <b>ꜰꜱᴜʙ ᴄʜᴀɴɴᴇʟ</b>\n\nꜰᴏʀᴍᴀᴛ:\n<code>-1001234567890 | https://t.me/+invite | Channel Name</code>", parse_mode="HTML")
-        return
-    if query.data == "fsub_list_ui":
-        rows = db.list_fsub()
-        lines = ["<b>📢 ꜰꜱᴜʙ ᴄʜᴀɴɴᴇʟꜱ</b>", ""]
-        for r in rows:
-            lines.append(f"• {r.get('title','CHANNEL')} — <code>{r.get('channel_id')}</code>")
-        if not rows: lines.append("ɴᴏ ᴄʜᴀɴɴᴇʟꜱ ᴀᴅᴅᴇᴅ.")
-        await query.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ ᴀᴅᴅ", callback_data="fsub_ui")],[InlineKeyboardButton("↩️ ʙᴀᴄᴋ", callback_data="settings")]]))
-        return
-    if query.data == "del_fsub_ui":
-        pending_actions[uid] = "remove_fsub"
-        await query.message.reply_text("➖ <b>ꜱᴇɴᴅ ᴛʜᴇ ꜰꜱᴜʙ ᴄʜᴀɴɴᴇʟ ɪᴅ ᴛᴏ ʀᴇᴍᴏᴠᴇ.</b>", parse_mode="HTML")
-        return
+        if missing: return await q.answer("❌ ᴊᴏɪɴ ᴀʟʟ ᴄʜᴀɴɴᴇʟꜱ ꜰɪʀꜱᴛ.", show_alert=True)
+        try: await q.message.delete()
+        except Exception: pass
+        return await render_start(q.message)
+    if not admin_ok(uid): return await q.answer("❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ", show_alert=True)
+    if q.data == "set_image":
+        _pending_image.add(uid); return await q.message.reply_text("🖼️ ʟᴇᴛᴍᴇ ʜᴀᴠᴇ ᴛʜᴇ ɪᴍᴀɢᴇ ʏᴏᴜ ᴡᴀɴᴛ ᴛᴏ ᴜꜱᴇ ᴀꜱ ꜱᴛᴀʀᴛ ɪᴍᴀɢᴇ.")
+    if q.data == "auto_delete":
+        cur = auto_delete_minutes(); _pending_autodelete.add(uid)
+        return await q.message.reply_text(f"🗑️ ᴀᴜᴛᴏ ᴅᴇʟᴇᴛᴇ ᴛɪᴍᴇ: <b>{cur} ᴍɪɴᴜᴛᴇꜱ</b>\n\nꜱᴇɴᴅ ᴛʜᴇ ɴᴇᴡ ᴛɪᴍᴇ ɪɴ ᴍɪɴᴜᴛᴇꜱ.\nꜱᴇɴᴅ <code>0</code> ᴛᴏ ᴅɪꜱᴀʙʟᴇ.", parse_mode="HTML")
+    if q.data == "admins":
+        lines = ["<b>👮 ᴀᴅᴍɪɴꜱ</b>", "", f"• <a href=\"tg://user?id={OWNER_ID}\">ᴏᴡɴᴇʀ</a> — <code>{OWNER_ID}</code>"]
+        for a in db.list_admins():
+            name = a["first_name"] or ("@" + a["username"] if a["username"] else "ᴀᴅᴍɪɴ")
+            lines.append(f"• <a href=\"tg://user?id={a['user_id']}\">{name}</a> — <code>{a['user_id']}</code>")
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("➕ ᴀᴅᴅ ᴀᴅᴍɪɴ", callback_data="add_admin"), InlineKeyboardButton("➖ ʀᴇᴍᴏᴠᴇ", callback_data="remove_admin")], [InlineKeyboardButton("↩️ ʙᴀᴄᴋ", callback_data="settings_back")]])
+        return await q.message.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=kb)
+    if q.data == "add_admin": _pending_admin.add(uid); return await q.message.reply_text("➕ ꜱᴇɴᴅ ᴛʜᴇ ᴜꜱᴇʀ ɪᴅ ᴛᴏ ᴀᴅᴅ ᴀꜱ ᴀᴅᴍɪɴ.")
+    if q.data == "remove_admin": _pending_admin.add(-uid); return await q.message.reply_text("➖ ꜱᴇɴᴅ ᴛʜᴇ ᴜꜱᴇʀ ɪᴅ ᴛᴏ ʀᴇᴍᴏᴠᴇ ᴀɴ ᴀᴅᴍɪɴ.")
+    if q.data == "fsub":
+        rows = db.list_fsub(); lines = ["<b>📢 ꜰꜱᴜʙ ᴄʜᴀɴɴᴇʟꜱ</b>", ""]
+        for r in rows: lines.append(f"• {r.get('title','CHANNEL')} — <code>{r['channel_id']}</code>")
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("➕ ᴀᴅᴅ ꜰꜱᴜʙ", callback_data="add_fsub")], [InlineKeyboardButton("↩️ ʙᴀᴄᴋ", callback_data="settings_back")]])
+        return await q.message.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=kb)
+    if q.data == "add_fsub": _pending_fsub.add(uid); return await q.message.reply_text("📢 ꜱᴇɴᴅ: <code>CHANNEL_ID INVITE_LINK TITLE</code>", parse_mode="HTML")
+    if q.data == "settings_back": return await q.message.edit_text("<b>⚙️ ꜱᴇᴛᴛɪɴɢꜱ</b>\n\nᴄʜᴏᴏꜱᴇ ᴀɴ ᴏᴘᴛɪᴏɴ.", parse_mode="HTML", reply_markup=settings_keyboard())
 
 
-def settings_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🖼️ ꜱᴇᴛ ɪᴍᴀɢᴇ", callback_data="setimage_ui"), InlineKeyboardButton("👥 ᴀᴅᴍɪɴꜱ", callback_data="admins_ui")],
-        [InlineKeyboardButton("➕ ᴀᴅᴅ ꜰꜱᴜʙ", callback_data="fsub_ui"), InlineKeyboardButton("📢 ꜰꜱᴜʙ ʟɪꜱᴛ", callback_data="fsub_list_ui")],
-        [InlineKeyboardButton("➖ ʀᴇᴍᴏᴠᴇ ꜰꜱᴜʙ", callback_data="del_fsub_ui")],
-    ])
+async def settings(update, context):
+    if not admin_ok(update.effective_user.id): return await update.message.reply_text("❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ.")
+    await update.message.reply_text("<b>⚙️ ꜱᴇᴛᴛɪɴɢꜱ</b>\n\nᴄʜᴏᴏꜱᴇ ᴀɴ ᴏᴘᴛɪᴏɴ.", parse_mode="HTML", reply_markup=settings_keyboard())
 
 
-async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def settings_input(update, context):
     uid = update.effective_user.id
-    if not auth(uid): return await update.message.reply_text("❌ ʏᴏᴜ ᴀʀᴇ ɴᴏᴛ ᴀᴜᴛʜᴏʀɪᴢᴇᴅ.")
-    await update.message.reply_text("<b>⚙️ ꜱᴇᴛᴛɪɴɢꜱ</b>\n\nᴄʜᴏᴏꜱᴇ ᴀ ꜱᴇᴛᴛɪɴɢ:", parse_mode="HTML", reply_markup=settings_keyboard())
-
-
-async def addsubs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if not auth(uid): return
-    if len(context.args) != 2:
-        return await update.message.reply_text("ᴜꜱᴀɢᴇ: /ᴀᴅᴅꜱᴜʙꜱ <ᴜꜱᴇʀ_ɪᴅ> <ᴅᴀʏꜱ>")
-    try:
-        target = int(context.args[0]); days = int(context.args[1])
-        if days <= 0: raise ValueError("days must be positive")
-        db.add_user(target)
-        expiry = db.add_premium(target, days)
-        await update.message.reply_text(f"✅ ᴘʀᴇᴍɪᴜᴍ ᴀᴅᴅᴇᴅ\n\n👤 ᴜꜱᴇʀ ɪᴅ: <code>{target}</code>\n📅 ᴅᴀʏꜱ: <b>{days}</b>\n⏳ ᴇxᴘɪʀᴇꜱ: <code>{expiry.isoformat()}</code>", parse_mode="HTML")
-    except Exception as e:
-        await update.message.reply_text(f"❌ {e}")
-
-
-async def removesubs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if not auth(uid): return
-    if len(context.args) != 1:
-        return await update.message.reply_text("ᴜꜱᴀɢᴇ: /ʀᴇᴍᴏᴠᴇꜱᴜʙꜱ <ᴜꜱᴇʀ_ɪᴅ>")
-    try:
-        target = int(context.args[0]); db.remove_premium(target)
-        await update.message.reply_text(f"✅ ᴘʀᴇᴍɪᴜᴍ ʀᴇᴍᴏᴠᴇᴅ\n\n👤 ᴜꜱᴇʀ ɪᴅ: <code>{target}</code>", parse_mode="HTML")
-    except Exception as e:
-        await update.message.reply_text(f"❌ {e}")
-
-
-async def settings_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    action = pending_actions.get(uid)
-    if not action or not auth(uid): return
-
-    if action == "setimage":
-        if not update.message.photo:
-            return await update.message.reply_text("🖼️ ᴘʟᴇᴀꜱᴇ ꜱᴇɴᴅ ᴀ ᴘʜᴏᴛᴏ.")
-        db.set_setting("start_image", update.message.photo[-1].file_id)
-        pending_actions.pop(uid, None)
-        return await update.message.reply_text("✅ Start image updated successfully.")
-
-    text = (update.message.text or "").strip()
-    if action in ("add_admin", "remove_admin"):
-        try: target = int(text)
-        except ValueError: return await update.message.reply_text("❌ ᴠᴀʟɪᴅ ᴜꜱᴇʀ ɪᴅ ꜱᴇɴᴅ ᴋᴀʀᴏ.")
-        if action == "add_admin": db.add_admin(target); msg = "✅ ᴀᴅᴍɪɴ ᴀᴅᴅᴇᴅ."
-        else: db.remove_admin(target); msg = "✅ ᴀᴅᴍɪɴ ʀᴇᴍᴏᴠᴇᴅ."
-        pending_actions.pop(uid, None)
-        return await update.message.reply_text(msg)
-
-    if action == "add_fsub":
-        parts = [p.strip() for p in text.split("|", 2)]
-        if len(parts) != 3: return await update.message.reply_text("❌ ᴜꜱᴇ: <code>CHANNEL_ID | INVITE_LINK | TITLE</code>", parse_mode="HTML")
-        db.add_fsub(parts[0], parts[1], parts[2]); pending_actions.pop(uid, None)
+    if not admin_ok(uid): return
+    if uid in _pending_image and update.message.photo:
+        db.set_setting("start_image", update.message.photo[-1].file_id); _pending_image.discard(uid)
+        return await update.message.reply_text("✅ ꜱᴛᴀʀᴛ ɪᴍᴀɢᴇ ᴜᴘᴅᴀᴛᴇᴅ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ.")
+    if uid in _pending_autodelete:
+        try:
+            minutes = int(update.message.text.strip()); db.set_setting("auto_delete_minutes", minutes); _pending_autodelete.discard(uid)
+            return await update.message.reply_text(f"✅ ᴀᴜᴛᴏ ᴅᴇʟᴇᴛᴇ ꜱᴇᴛ ᴛᴏ {minutes} ᴍɪɴᴜᴛᴇꜱ.")
+        except Exception: return await update.message.reply_text("❌ ꜱᴇɴᴅ ᴀ ᴠᴀʟɪᴅ ɴᴜᴍʙᴇʀ.")
+    if uid in _pending_admin or -uid in _pending_admin:
+        try: target = int(update.message.text.strip())
+        except Exception: return await update.message.reply_text("❌ ᴇɴᴛᴇʀ ᴀ ᴠᴀʟɪᴅ ᴜꜱᴇʀ ɪᴅ.")
+        remove = -uid in _pending_admin; _pending_admin.discard(uid); _pending_admin.discard(-uid)
+        if remove: db.remove_admin(target); return await update.message.reply_text("✅ ᴀᴅᴍɪɴ ʀᴇᴍᴏᴠᴇᴅ.")
+        db.add_admin(target); return await update.message.reply_text("✅ ᴀᴅᴍɪɴ ᴀᴅᴅᴇᴅ.")
+    if uid in _pending_fsub:
+        parts = update.message.text.split(maxsplit=2)
+        if len(parts) < 2: return await update.message.reply_text("❌ ᴜꜱᴇ: CHANNEL_ID INVITE_LINK TITLE")
+        title = parts[2] if len(parts) > 2 else parts[0]
+        db.add_fsub(parts[0], parts[1], title); _pending_fsub.discard(uid)
         return await update.message.reply_text("✅ ꜰꜱᴜʙ ᴄʜᴀɴɴᴇʟ ᴀᴅᴅᴇᴅ.")
 
-    if action == "remove_fsub":
-        db.del_fsub(text); pending_actions.pop(uid, None)
-        return await update.message.reply_text("✅ ꜰꜱᴜʙ ᴄʜᴀɴɴᴇʟ ʀᴇᴍᴏᴠᴇᴅ.")
+
+async def addsubs(update, context):
+    if not admin_ok(update.effective_user.id): return await update.message.reply_text("❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ.")
+    if len(context.args) != 2: return await update.message.reply_text("ᴜꜱᴀɢᴇ: /ᴀᴅᴅꜱᴜʙꜱ USER_ID DAYS")
+    try:
+        expiry = db.add_premium(int(context.args[0]), int(context.args[1]))
+        await update.message.reply_text(f"✅ ᴘʀᴇᴍɪᴜᴍ ᴀᴅᴅᴇᴅ.\n\nᴜꜱᴇʀ: <code>{context.args[0]}</code>\nᴇxᴘɪʀʏ: <code>{expiry.isoformat()}</code>", parse_mode="HTML")
+    except Exception as e: await update.message.reply_text(f"❌ {e}")
 
 
-async def channel_post_indexer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def removesubs(update, context):
+    if not admin_ok(update.effective_user.id): return await update.message.reply_text("❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ.")
+    if len(context.args) != 1: return await update.message.reply_text("ᴜꜱᴀɢᴇ: /ʀᴇᴍᴏᴠᴇꜱᴜʙꜱ USER_ID")
+    db.remove_premium(int(context.args[0])); await update.message.reply_text(f"✅ ᴘʀᴇᴍɪᴜᴍ ʀᴇᴍᴏᴠᴇᴅ.\n\nᴜꜱᴇʀ: <code>{context.args[0]}</code>", parse_mode="HTML")
+
+
+async def channel_post_indexer(update, context):
     post = update.channel_post
     if not post or post.chat_id != DB_CHANNEL_ID: return
     try: db.add_file(DB_CHANNEL_ID, post.message_id, post.caption or post.text or "")

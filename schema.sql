@@ -29,6 +29,12 @@ create table if not exists files (
     unique(channel_id, message_id)
 );
 
+create table if not exists main_links (
+    token text primary key,
+    target text not null,
+    created_at timestamptz not null default now()
+);
+
 create table if not exists batches (
     batch_id text primary key,
     created_at timestamptz not null default now()

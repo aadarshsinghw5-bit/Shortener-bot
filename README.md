@@ -1,129 +1,109 @@
-# File Store Bot — Clean Final Build
+# File Store Bot — Final Web Service Build
 
-This is a clean implementation of the latest agreed flow.
+This build matches the latest agreed flow.
 
-## UI
+## Main links
 
-### /start
-Uses the image saved through `/setimage` and the requested screenshot-style start caption:
+### `/genlink`
+Reply to **any message/file** and use `/genlink`.
 
-Hi There....! 💥
+- The bot copies the replied message into `DB_CHANNEL_ID` automatically.
+- Forward headers are not preserved by the copy.
+- A permanent/reusable main link is created from the saved DB post.
+- A `↗ SHARE URL` button is placed under the DB-channel post.
+- The main link itself does **not** expire after 2 hours and is **not** single-use.
 
-I am a file-store bot.
-I can generate links directly with no problems.
+### `/batch`
+Use:
 
-My Owner: @Its_Lozo
+`/batch FIRST_DB_POST_LINK LAST_DB_POST_LINK`
 
-Buttons: `ABOUT` and `CLOSE`.
+All indexed DB-channel posts between those message IDs are included.
+A reusable batch main link is created, and its Share URL button is attached to the first post in the batch range.
 
-### ABOUT
-Keeps the start image and shows:
+## Shortener flow
 
-About Us..
+For a **non-premium** user:
 
-➤ Made for : Anime Hub
-➤ Owner : @Its_Lozo
-➤ Developer : @Its_Lozo
+1. User opens the reusable main Genlink/Batch link.
+2. FSUB is checked first.
+3. A **new AroLinks shortener link is created for that user and that click**.
+4. That shortener session is valid for **2 hours from creation**.
+5. The shortener session is bound to the Telegram user ID.
+6. Another user cannot use that shortener session.
+7. When AroLinks is completed and the user returns to the bot, the session is consumed and the file/batch is delivered.
+8. The consumed session cannot be reused.
+9. If the user opens the same main link again, a **fresh shortener session** is created.
 
-Adios !!
+The reusable main link is never converted into a 2-hour token.
 
-Buttons: `BACK` and `CLOSE`.
+Premium users still have to pass FSUB, but skip AroLinks and receive the file/batch directly.
 
-### CLOSE
-Deletes the bot's current message.
+## Download page UI
 
-## Links
+Uses the configured start image and screenshot-style Unicode font.
 
-### Single
-Reply to ANY message/file and use:
+Buttons:
 
-`/genlink`
-
-No file ID is requested. `/save` is not implemented.
-
-The message reference is stored in the token, so a single link does not need the message to be in the DB channel.
-
-### Batch
-Only:
-
-`/batch FIRST_DB_FILE_LINK LAST_DB_FILE_LINK`
-
-Both links must point to posts in the configured DB channel. All indexed DB posts between those message IDs are included.
-
-## Shortener
-
-Non-premium users:
-1. Open generated link.
-2. FSUB is checked.
-3. Download page is shown.
-4. User clicks the download button.
-5. AroLinks is completed.
-6. The bot sends the requested file(s).
-
-Shortener tokens are valid for 2 hours and are single-use.
-
-Premium users:
-- Still must pass FSUB.
-- Skip AroLinks.
-- Receive the file directly.
-
-Download page buttons:
-- `• CLICK HERE TO DOWNLOAD •`
-- `PREMIUM` → https://t.me/PremiumHub094
-- `TUTORIAL` → https://t.me/Tutorial_Hub_94/4
+- `• CLICK HERE TO DOWNLOAD •` → AroLinks
+- `PREMIUM` → `https://t.me/PremiumHub094`
+- `TUTORIAL` → `https://t.me/Tutorial_Hub_94/4`
 
 Contact: `@Its_Lozo`
 
+## Start / About
+
+The start image is set from `/settings`/`/setimage` and is reused on the download page.
+
+- `/start` → configured image + requested start caption + ABOUT/CLOSE
+- ABOUT → same image + About caption + BACK/CLOSE
+- CLOSE → deletes the current bot message
+
+User-facing main UI text and buttons use the requested Unicode small-cap style.
+
 ## Start image
 
-Send a photo to the bot, reply to it with:
+Reply to a photo with:
 
 `/setimage`
 
-The Telegram file ID is saved in Supabase. You do NOT need a START_IMAGE URL environment variable.
+The Telegram file ID is stored in Supabase settings. No image URL environment variable is required.
 
-## DB channel
+## Supabase
 
-Add the bot as an administrator to the configured DB channel.
+Run `schema.sql` once in Supabase SQL Editor.
 
-New channel posts are automatically indexed in `files`.
+Required environment variables:
 
-Set:
+- `BOT_TOKEN`
+- `BOT_USERNAME`
+- `OWNER_ID`
+- `DB_CHANNEL_ID`
+- `SUPABASE_URL`
+- `SUPABASE_KEY`
+- `SHORTENER_API_URL` (optional; defaults to `https://arolinks.com/api`)
+- `SHORTENER_API_KEY`
 
-`DB_CHANNEL_ID=-100xxxxxxxxxx`
+Do **not** add a manual `PORT` environment variable. Render supplies `PORT` automatically.
 
-## FSUB
+## Render Web Service
 
-Add:
+Build command:
 
-`/addfsub -1001234567890 https://t.me/+invite Channel Name`
-
-Remove:
-
-`/delfsub -1001234567890`
-
-The bot must be able to call `getChatMember` for the FSUB channel.
-
-## Premium
-
-Add:
-
-`/premium USER_ID DAYS`
-
-Remove:
-
-`/unpremium USER_ID`
-
-## Render
-
-Use a **Background Worker**:
-
-Build:
 `pip install -r requirements.txt`
 
-Start:
+Start command:
+
 `python -u bot.py`
 
-Important: Telegram polling allows only one active `getUpdates` consumer for a bot token. Do NOT run this same bot token in a second Render service, local process, VPS, or UptimeRobot process.
+The bot starts an HTTP health server on `0.0.0.0:$PORT` and Telegram polling in the same process.
 
-UptimeRobot should only monitor an HTTP health endpoint if one is added; it must not run the bot itself.
+## UptimeRobot
+
+UptimeRobot must only monitor the Render Web Service URL, for example:
+
+`https://YOUR-SERVICE.onrender.com/`
+
+It must **not** run Telegram polling or use the bot token.
+
+Only one process may poll Telegram `getUpdates` for this bot token.

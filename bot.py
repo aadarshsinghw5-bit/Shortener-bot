@@ -3,6 +3,7 @@ import logging
 import asyncio
 import re
 import threading
+from urllib.parse import quote
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from dotenv import load_dotenv
@@ -22,6 +23,21 @@ logging.basicConfig(
     level=logging.INFO,
 )
 log = logging.getLogger("file-store-bot")
+
+
+# Screenshot-style Unicode small-cap font. This changes visible text and button
+# labels without changing HTML tags or URLs.
+_FONT = str.maketrans({
+    **dict(zip("abcdefghijklmnopqrstuvwxyz", "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘǫʀꜱᴛᴜᴠᴡxʏᴢ")),
+    **dict(zip("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘǫʀꜱᴛᴜᴠᴡxʏᴢ")),
+})
+
+def font(text):
+    return text.translate(_FONT)
+
+def font_html(text):
+    parts = re.split(r"(<[^>]+>)", text)
+    return "".join(p if p.startswith("<") else font(p) for p in parts)
 # Never expose Telegram Bot API URLs (they contain the bot token).
 # httpx/httpcore INFO logging can print the full request URL.
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -61,18 +77,17 @@ def start_image():
 
 
 def start_caption():
-    # Keep this text/style as requested.
-    return (
-        "Hi There....! 💥\n\n"
+    return font_html(
+        "<i>Hi There....! 💥</i>\n\n"
         "I am a file-store bot.\n"
         "I can generate links directly with no problems.\n\n"
-        "My Owner: @Its_Lozo"
+        "<b>My Owner:</b> <a href=\"https://t.me/Its_Lozo\">@Its_Lozo</a>"
     )
 
 
 def about_caption():
-    return (
-        "<b>About Us..</b>\n\n"
+    return font_html(
+        "<b><i>About Us..</i></b>\n\n"
         "➤ Made for : <a href=\"https://t.me/Anime_Hub_94\">Anime Hub</a>\n"
         "➤ Owner : <a href=\"https://t.me/Its_Lozo\">@Its_Lozo</a>\n"
         "➤ Developer : <a href=\"https://t.me/Its_Lozo\">@Its_Lozo</a>\n\n"
@@ -82,15 +97,15 @@ def about_caption():
 
 def start_keyboard():
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton("ABOUT", callback_data="about"),
-        InlineKeyboardButton("CLOSE", callback_data="close"),
+        InlineKeyboardButton(font("ABOUT"), callback_data="about"),
+        InlineKeyboardButton(font("CLOSE"), callback_data="close"),
     ]])
 
 
 def about_keyboard():
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton("BACK", callback_data="back"),
-        InlineKeyboardButton("CLOSE", callback_data="close"),
+        InlineKeyboardButton(font("BACK"), callback_data="back"),
+        InlineKeyboardButton(font("CLOSE"), callback_data="close"),
     ]])
 
 
@@ -163,10 +178,10 @@ def fsub_keyboard(rows):
     for row in rows:
         if row.get("invite_link"):
             buttons.append([InlineKeyboardButton(
-                f"JOIN {row.get('title') or 'CHANNEL'}",
+                font(f"JOIN {row.get('title') or 'CHANNEL'}"),
                 url=row["invite_link"]
             )])
-    buttons.append([InlineKeyboardButton("✅ CHECK JOIN", callback_data="check_fsub")])
+    buttons.append([InlineKeyboardButton(font("✅ CHECK JOIN"), callback_data="check_fsub")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -174,36 +189,47 @@ def token_link(token):
     return f"https://t.me/{BOT_USERNAME}?start=verify_{token}"
 
 
+async def make_share_button(main_url):
+    share_url = "https://telegram.me/share/url?url=" + quote(main_url, safe="")
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(font("↗ SHARE URL"), url=share_url)
+    ]])
+
+
 async def genlink(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if uid != OWNER_ID and not db.is_admin(uid):
-        return await update.message.reply_text("❌ You are not authorized.")
+        return await update.message.reply_text(font("❌ You are not authorized."))
 
     replied = update.message.reply_to_message
     if not replied:
-        return await update.message.reply_text(
-            "Reply to the message/file and use /genlink."
-        )
+        return await update.message.reply_text(font("Reply to any message/file and use /genlink."))
 
-    # No file ID and no /save. Any message the bot can later copy from
-    # (including a forwarded message) can be linked directly.
-    target = f"message:{replied.chat_id}:{replied.message_id}"
-    token = db.create_token(uid, target, hours=2)
-    url = token_link(token)
-
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton(
-            "🔗 SHARE LINK",
-            url=f"https://t.me/share/url?url={url}"
+    # Always copy into the DB channel. This removes the forward header/tag and
+    # gives every generated link a stable DB-channel source message.
+    try:
+        copied = await context.bot.copy_message(
+            chat_id=DB_CHANNEL_ID,
+            from_chat_id=replied.chat_id,
+            message_id=replied.message_id,
         )
-    ]])
+    except Exception:
+        log.exception("GENLINK DB save failed")
+        return await update.message.reply_text(font("❌ Could not save the message to the DB channel."))
+
+    file_id = db.add_file(DB_CHANNEL_ID, copied.message_id, replied.caption or replied.text or "")
+    main_url = bot_link(f"file_{file_id}")
+    try:
+        await context.bot.edit_message_reply_markup(
+            chat_id=DB_CHANNEL_ID,
+            message_id=copied.message_id,
+            reply_markup=await make_share_button(main_url),
+        )
+    except Exception:
+        log.exception("Could not add Share URL button")
 
     await update.message.reply_text(
-        f"✅ <b>Link generated</b>\n\n"
-        f"{url}\n\n"
-        f"⏳ Valid for 2 hours and usable once.",
-        parse_mode="HTML",
-        reply_markup=keyboard,
+        font_html(f"<b>🔗 Link generated!</b>\\n\\n{main_url}"),
         disable_web_page_preview=True,
     )
 
@@ -212,7 +238,6 @@ def parse_message_link(link):
     m = re.fullmatch(r"https?://t\.me/c/(\d+)/(\d+)", link.strip())
     if m:
         return int("-100" + m.group(1)), int(m.group(2))
-
     m = re.fullmatch(r"https?://t\.me/([^/]+)/(\d+)", link.strip())
     if m:
         return m.group(1), int(m.group(2))
@@ -222,81 +247,74 @@ def parse_message_link(link):
 async def batch(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if uid != OWNER_ID and not db.is_admin(uid):
-        return await update.message.reply_text("❌ You are not authorized.")
+        return await update.message.reply_text(font("❌ You are not authorized."))
 
     if len(context.args) != 2:
-        return await update.message.reply_text(
-            "Usage:\n/batch (first_db_file_link) (last_db_file_link)"
-        )
+        return await update.message.reply_text(font("Usage: /batch FIRST_DB_POST_LINK LAST_DB_POST_LINK"))
 
     first = parse_message_link(context.args[0])
     last = parse_message_link(context.args[1])
     if not first or not last:
-        return await update.message.reply_text("❌ Invalid Telegram post link.")
+        return await update.message.reply_text(font("❌ Invalid Telegram post link."))
 
-    # Resolve public DB-channel links too.
     try:
         first_chat = await context.bot.get_chat(first[0]) if isinstance(first[0], str) else None
         last_chat = await context.bot.get_chat(last[0]) if isinstance(last[0], str) else None
         first_channel = first_chat.id if first_chat else first[0]
         last_channel = last_chat.id if last_chat else last[0]
     except Exception:
-        return await update.message.reply_text("❌ Could not resolve the DB channel link.")
+        return await update.message.reply_text(font("❌ Could not resolve the DB channel link."))
 
-    first_msg, last_msg = first[1], last[1]
     if first_channel != DB_CHANNEL_ID or last_channel != DB_CHANNEL_ID:
-        return await update.message.reply_text(
-            "❌ Both links must be posts from the configured DB channel."
-        )
+        return await update.message.reply_text(font("❌ Both links must be posts from the configured DB channel."))
 
-    lo, hi = sorted((first_msg, last_msg))
+    lo, hi = sorted((first[1], last[1]))
     rows = db.list_files_between(DB_CHANNEL_ID, lo, hi)
     if not rows:
-        return await update.message.reply_text(
-            "❌ No DB files found between those two posts."
-        )
+        return await update.message.reply_text(font("❌ No DB posts found between those two posts."))
 
     batch_id = db.create_batch([r["file_id"] for r in rows])
-    token = db.create_token(uid, f"batch:{batch_id}", hours=2)
-    url = token_link(token)
+    main_url = bot_link(f"batch_{batch_id}")
+
+    # The batch's main link is attached to the first DB post in the range.
+    try:
+        await context.bot.edit_message_reply_markup(
+            chat_id=DB_CHANNEL_ID,
+            message_id=rows[0]["message_id"],
+            reply_markup=await make_share_button(main_url),
+        )
+    except Exception:
+        log.exception("Could not add batch Share URL button")
 
     await update.message.reply_text(
-        f"✅ <b>Batch link generated</b>\n\n"
-        f"Files: <b>{len(rows)}</b>\n\n{url}",
-        parse_mode="HTML",
+        font_html(f"<b>✅ Batch created!</b>\\n\\n📦 Posts: <b>{len(rows)}</b>\\n\\n{main_url}"),
         disable_web_page_preview=True,
     )
 
 
 async def send_download_page(message, short_url):
     image = start_image()
-    caption = (
-        "<b>HEY BRO/SIS,</b>\n\n"
-        "➤ <b>YOUR LINK IS READY, KINDLY CLICK ON\n"
-        "DOWNLOAD BUTTON! 👇</b>\n\n"
-        "TO BUY PREMIUM, CONTACT: "
+    caption = font_html(
+        "<b>📊 HEY BRO/SIS,</b>\\n\\n"
+        "➜ <b>YOUR LINK IS READY, KINDLY CLICK ON\\n"
+        "DOWNLOAD BUTTON! 👇</b>\\n\\n"
+        "<b>TO BUY PREMIUM, CONTACT: </b>"
         "<a href=\"https://t.me/Its_Lozo\">@Its_Lozo</a>"
     )
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("• CLICK HERE TO DOWNLOAD •", url=short_url)],
+        [InlineKeyboardButton(font("• CLICK HERE TO DOWNLOAD •"), url=short_url)],
         [
-            InlineKeyboardButton("PREMIUM", url="https://t.me/PremiumHub094"),
-            InlineKeyboardButton("TUTORIAL", url="https://t.me/Tutorial_Hub_94/4"),
+            InlineKeyboardButton(font("PREMIUM"), url="https://t.me/PremiumHub094"),
+            InlineKeyboardButton(font("TUTORIAL"), url="https://t.me/Tutorial_Hub_94/4"),
         ],
     ])
 
     if image:
         try:
-            await message.reply_photo(
-                photo=image,
-                caption=caption,
-                parse_mode="HTML",
-                reply_markup=keyboard,
-            )
+            await message.reply_photo(photo=image, caption=caption, parse_mode="HTML", reply_markup=keyboard)
             return
         except Exception:
             log.exception("Could not send download-page image")
-
     await message.reply_text(caption, parse_mode="HTML", reply_markup=keyboard)
 
 
@@ -306,16 +324,24 @@ async def deliver_target(update, target):
         try:
             await context_bot_copy(update, int(chat_id), int(message_id))
         except Exception:
-            await update.message.reply_text(
-                "❌ I could not access the original message anymore."
-            )
+            await update.message.reply_text(font("❌ I could not access the original message anymore."))
+        return
+
+    if target.startswith("file:"):
+        row = db.get_file(target.split(":", 1)[1])
+        if not row:
+            return await update.message.reply_text(font("❌ File not found."))
+        try:
+            await context_bot_copy(update, row["channel_id"], row["message_id"])
+        except Exception:
+            await update.message.reply_text(font("❌ I could not access the saved file."))
         return
 
     if target.startswith("batch:"):
         batch_id = target.split(":", 1)[1]
         rows = db.get_batch_items(batch_id)
         if not rows:
-            return await update.message.reply_text("❌ Batch not found.")
+            return await update.message.reply_text(font("❌ Batch not found."))
         for row in rows:
             try:
                 await context_bot_copy(update, row["channel_id"], row["message_id"])
@@ -324,7 +350,7 @@ async def deliver_target(update, target):
                 log.exception("Batch item delivery failed")
         return
 
-    await update.message.reply_text("❌ Invalid link target.")
+    await update.message.reply_text(font("❌ Invalid link target."))
 
 
 async def context_bot_copy(update, chat_id, message_id):
@@ -335,40 +361,38 @@ async def context_bot_copy(update, chat_id, message_id):
     )
 
 
-async def verify(update: Update, context: ContextTypes.DEFAULT_TYPE, token):
+async def open_main_target(update, context, target):
     uid = update.effective_user.id
-
-    # FSUB always comes first: premium never bypasses FSUB.
-    missing = await is_fsub_member(context.bot, uid)
-    if missing:
-        await update.message.reply_text(
-            "⚡ <b>JOIN REQUIRED</b>\n\n"
-            "Join all required channels first, then tap <b>CHECK JOIN</b>.",
-            parse_mode="HTML",
-            reply_markup=fsub_keyboard(missing),
-        )
-        return
-
-    consumed = db.consume_token(token)
-    if not consumed:
-        return await update.message.reply_text(
-            "❌ This link is expired or already used."
-        )
-
-    _, target = consumed
-
-    # Premium bypasses ONLY the shortener.
     if db.is_premium(uid):
         await deliver_target(update, target)
         return
 
     short_url = shortener.create(uid, target, BOT_USERNAME)
     if not short_url:
-        return await update.message.reply_text(
-            "⚠️ Shortener is not configured correctly."
-        )
-
+        await update.message.reply_text(font("⚠️ Shortener is not configured correctly."))
+        return
     await send_download_page(update.message, short_url)
+
+
+async def verify(update: Update, context: ContextTypes.DEFAULT_TYPE, token):
+    uid = update.effective_user.id
+
+    # FSUB is mandatory for everyone, including premium users.
+    missing = await is_fsub_member(context.bot, uid)
+    if missing:
+        await update.message.reply_text(
+            font_html("⚡ <b>JOIN REQUIRED</b>\\n\\nJoin all required channels first, then tap <b>CHECK JOIN</b>."),
+            parse_mode="HTML",
+            reply_markup=fsub_keyboard(missing),
+        )
+        return
+
+    consumed = db.consume_token_for_user(token, uid)
+    if not consumed:
+        return await update.message.reply_text(font("❌ This shortener link is expired, already used, or belongs to another user."))
+
+    _, target = consumed
+    await deliver_target(update, target)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -376,12 +400,43 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.add_user(user.id, user.username or "", user.first_name or "")
 
     if db.is_banned(user.id):
-        return await update.message.reply_text("🚫 You are banned from using this bot.")
+        return await update.message.reply_text(font("🚫 You are banned from using this bot."))
 
-    if context.args and context.args[0].startswith("verify_"):
-        return await verify(update, context, context.args[0][7:])
+    arg = context.args[0] if context.args else ""
+
+    if arg.startswith("verify_"):
+        return await verify(update, context, arg[7:])
+
+    # MAIN LINKS ARE REUSABLE. Only the shortener token generated after each
+    # click is time-limited/single-use.
+    if arg.startswith("file_"):
+        if not await check_and_show_fsub(update, context):
+            return
+        file_id = arg[5:]
+        target = f"file:{file_id}"
+        return await open_main_target(update, context, target)
+
+    if arg.startswith("batch_"):
+        if not await check_and_show_fsub(update, context):
+            return
+        batch_id = arg[6:]
+        if not db.get_batch_items(batch_id):
+            return await update.message.reply_text(font("❌ Batch not found or empty."))
+        return await open_main_target(update, context, f"batch:{batch_id}")
 
     await render_start(update.message)
+
+
+async def check_and_show_fsub(update, context):
+    missing = await is_fsub_member(context.bot, update.effective_user.id)
+    if not missing:
+        return True
+    await update.message.reply_text(
+        font_html("⚡ <b>JOIN REQUIRED</b>\\n\\nJoin all required channels first, then tap <b>CHECK JOIN</b>."),
+        parse_mode="HTML",
+        reply_markup=fsub_keyboard(missing),
+    )
+    return False
 
 
 async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -407,11 +462,11 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         missing = await is_fsub_member(context.bot, query.from_user.id)
         if missing:
             await query.answer(
-                "❌ You still need to join all required channels.",
+                font("❌ You still need to join all required channels."),
                 show_alert=True,
             )
         else:
-            await query.answer("✅ FSUB completed.")
+            await query.answer(font("✅ FSUB completed."))
             await query.message.reply_text(
                 "✅ Subscription check passed. Open your file link again."
             )
@@ -424,11 +479,13 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("❌ You are not authorized.")
 
     await update.message.reply_text(
-        "<b>⚙️ SETTINGS</b>\n\n"
-        "🖼️ Start Image\n"
-        "Reply to any photo with <code>/setimage</code> to set it as the bot's "
-        "start/download-page image.\n\n"
-        "The image is saved in Supabase settings; no image URL variable is required.",
+        font_html(
+            "<b>⚙️ SETTINGS</b>\n\n"
+            "🖼️ Start Image\n"
+            "Reply to any photo with <code>/setimage</code> to set it as the bot's "
+            "start/download-page image.\n\n"
+            "The image is saved in Supabase settings; no image URL variable is required."
+        ),
         parse_mode="HTML",
     )
 
@@ -445,7 +502,7 @@ async def setimage(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     db.set_setting("start_image", replied.photo[-1].file_id)
-    await update.message.reply_text("✅ Start image updated.")
+    await update.message.reply_text(font("✅ Start image updated successfully."))
 
 
 async def addfsub(update: Update, context: ContextTypes.DEFAULT_TYPE):

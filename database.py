@@ -3,22 +3,29 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from supabase import create_client
 
-
 class Database:
     def __init__(self):
         self.db = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
 
     def add_user(self, user_id, username="", first_name=""):
-        self.db.table("users").upsert({
-            "user_id": int(user_id), "username": username or "", "first_name": first_name or ""
-        }).execute()
+        self.db.table("users").upsert({"user_id": int(user_id), "username": username or "", "first_name": first_name or ""}).execute()
+
+    def list_users(self):
+        r = self.db.table("users").select("*").order("created_at").execute()
+        return r.data or []
 
     def is_banned(self, user_id):
         r = self.db.table("banned_users").select("user_id").eq("user_id", int(user_id)).limit(1).execute()
         return bool(r.data)
 
     def add_admin(self, user_id):
-        self.db.table("admins").upsert({"user_id": int(user_id)}).execute()
+        user_id = int(user_id)
+        # admins references users, so ensure the target exists first.
+        self.add_user(user_id)
+        self.db.table("admins").upsert({"user_id": user_id}).execute()
+
+    def delete_user(self, user_id):
+        self.db.table("users").delete().eq("user_id", int(user_id)).execute()
 
     def remove_admin(self, user_id):
         self.db.table("admins").delete().eq("user_id", int(user_id)).execute()
@@ -29,9 +36,8 @@ class Database:
 
     def list_admins(self):
         r = self.db.table("admins").select("user_id").order("user_id").execute()
-        rows = r.data or []
         out = []
-        for row in rows:
+        for row in r.data or []:
             uid = int(row["user_id"])
             u = self.db.table("users").select("username,first_name").eq("user_id", uid).limit(1).execute()
             info = u.data[0] if u.data else {}
@@ -51,9 +57,10 @@ class Database:
                 base = max(now, old_expiry)
             except Exception:
                 pass
+        start = now
         expiry = base + timedelta(days=int(days))
-        self.db.table("premium").upsert({"user_id": user_id, "expires_at": expiry.isoformat()}).execute()
-        return expiry
+        self.db.table("premium").upsert({"user_id": user_id, "starts_at": start.isoformat(), "expires_at": expiry.isoformat()}).execute()
+        return start, expiry
 
     def remove_premium(self, user_id):
         old = self.get_premium(user_id)
@@ -76,6 +83,10 @@ class Database:
             return None
         return row
 
+    def list_premium(self):
+        r = self.db.table("premium").select("*").order("expires_at").execute()
+        return r.data or []
+
     def is_premium(self, user_id):
         return self.get_premium(user_id) is not None
 
@@ -91,9 +102,7 @@ class Database:
         if existing.data:
             return existing.data[0]["file_id"]
         file_id = uuid.uuid4().hex[:12]
-        self.db.table("files").insert({
-            "file_id": file_id, "channel_id": int(channel_id), "message_id": int(message_id), "caption": caption or ""
-        }).execute()
+        self.db.table("files").insert({"file_id": file_id, "channel_id": int(channel_id), "message_id": int(message_id), "caption": caption or ""}).execute()
         return file_id
 
     def get_file(self, file_id):
@@ -116,7 +125,6 @@ class Database:
         r = self.db.table("batch_items").select("file_id,position").eq("batch_id", batch_id).order("position").execute()
         return [row for item in (r.data or []) if (row := self.get_file(item["file_id"]))]
 
-    # Permanent, reusable main links. These are intentionally NOT expiring or single-use.
     def create_main_link(self, target):
         token = uuid.uuid4().hex
         self.db.table("main_links").insert({"token": token, "target": target}).execute()
@@ -126,14 +134,10 @@ class Database:
         r = self.db.table("main_links").select("*").eq("token", token).limit(1).execute()
         return r.data[0] if r.data else None
 
-    # Temporary per-user shortener session. Expires after 2 hours and is consumed only after completion.
     def create_token(self, user_id, target, hours=2):
         token = uuid.uuid4().hex
         expires = datetime.now(timezone.utc) + timedelta(hours=hours)
-        self.db.table("tokens").insert({
-            "token": token, "user_id": int(user_id), "target": target,
-            "expires_at": expires.isoformat(), "used": False
-        }).execute()
+        self.db.table("tokens").insert({"token": token, "user_id": int(user_id), "target": target, "expires_at": expires.isoformat(), "used": False}).execute()
         return token
 
     def get_token(self, token):
@@ -166,3 +170,8 @@ class Database:
     def list_fsub(self):
         r = self.db.table("fsub_channels").select("*").order("title").execute()
         return r.data or []
+
+    def create_broadcast(self, message_id, delete_at=None):
+        bid = uuid.uuid4().hex[:12]
+        self.db.table("broadcasts").insert({"broadcast_id": bid, "message_id": int(message_id), "delete_at": delete_at.isoformat() if delete_at else None}).execute()
+        return bid

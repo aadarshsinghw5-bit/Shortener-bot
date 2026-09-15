@@ -187,13 +187,33 @@ def auto_delete_minutes():
     try:return max(0,int(db.get_setting("auto_delete_minutes","10")))
     except:return 10
 
-async def deliver_and_notify(update,context,target):
-    ids=await deliver_target(update,target)
-    if not ids:return
-    mins=auto_delete_minutes()
-    if mins>0:
-        msg=await bot.send_message(chat_id, f"This File is deleting automatically in {minutes} minutes.\n\nForward in your Saved Messages..!")
-        ids.append(notice.message_id); context.job_queue.run_once(delete_delivered,mins*60,data={"chat_id":update.effective_chat.id,"message_ids":ids})
+async def deliver_and_notify(update, context, target):
+    ids = await deliver_target(update, target)
+
+    if not ids:
+        return
+
+    mins = auto_delete_minutes()
+
+    if mins > 0:
+        msg = await bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=(
+                f"This File is deleting automatically in {mins} minutes.\n\n"
+                f"Forward in your Saved Messages..!"
+            )
+        )
+
+        ids.append(msg.message_id)
+
+        context.job_queue.run_once(
+            delete_delivered,
+            mins * 60,
+            data={
+                "chat_id": update.effective_chat.id,
+                "message_ids": ids
+            }
+        )
 
 async def verify(update,context,token):
     uid=update.effective_user.id

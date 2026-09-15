@@ -268,25 +268,27 @@ async def start(update,context):
 
 async def callback(update, context):
     q = update.callback_query
-    
-    await q.answer()
-    
- if not admin_ok(uid):
-    return await q.answer("❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ", show_alert=True)
-
-if q.data in ("add_admin", "remove_admin") and uid != OWNER_ID:
-    return await q.answer(
-        "🚫 ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ᴀᴅᴅ/ʀᴇᴍᴏᴠᴇ ᴀᴅᴍɪɴꜱ",
-        show_alert=True
-    )
-
-if q.data in ("add_fsub", "remove_fsub") and uid != OWNER_ID:
-    return await q.answer(
-        "🚫 ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ᴀᴅᴅ/ʀᴇᴍᴏᴠᴇ ꜰꜱᴜʙ",
-        show_alert=True
-    )
-
     uid = q.from_user.id
+
+    if not admin_ok(uid):
+        return await q.answer(
+            "❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ",
+            show_alert=True
+        )
+
+    if q.data in ("add_admin", "remove_admin") and uid != OWNER_ID:
+        return await q.answer(
+            "🚫 ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ᴀᴅᴅ/ʀᴇᴍᴏᴠᴇ ᴀᴅᴍɪɴꜱ",
+            show_alert=True
+        )
+
+    if q.data in ("add_fsub", "remove_fsub") and uid != OWNER_ID:
+        return await q.answer(
+            "🚫 ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ᴀᴅᴅ/ʀᴇᴍᴏᴠᴇ ꜰꜱᴜʙ",
+            show_alert=True
+        )
+
+    await q.answer()
 
     # =========================
     # CLOSE

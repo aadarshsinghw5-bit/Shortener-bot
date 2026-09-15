@@ -1,4 +1,3 @@
-⁸
 import os
 import logging
 import re

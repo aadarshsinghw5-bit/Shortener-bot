@@ -196,7 +196,7 @@ async def deliver_and_notify(update, context, target):
     mins = auto_delete_minutes()
 
     if mins > 0:
-        msg = await bot.send_message(
+        msg = await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=(
                 f"This File is deleting automatically in {mins} minutes.\n\n"

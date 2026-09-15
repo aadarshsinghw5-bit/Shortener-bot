@@ -344,13 +344,14 @@ async def myplan(update, context):
     plan = db.get_premium(uid)
 
     if not plan:
-        return await update.message.reply_text(
-            "💎 <b>ᴍʏ ᴘʟᴀɴ</b>\n\n"
-            "🔴 ꜱᴛᴀᴛᴜꜱ: ꜰʀᴇᴇ ᴘʟᴀɴ\n\n"
-            "⚡ ꜱʜᴏʀᴛᴇɴᴇʀ ʙʏᴘᴀꜱꜱ: ᴅɪꜱᴀʙʟᴇᴅ\n\n"
-            "💎 ɢᴇᴛ ᴘʀᴇᴍɪᴜᴍ ᴛᴏ ᴇɴᴊᴏʏ ꜱʜᴏʀᴛᴇɴᴇʀ-ꜰʀᴇᴇ ᴅᴏᴡɴʟᴏᴀᴅꜱ.",
-            parse_mode="HTML"
-        )
+    return await update.message.reply_text(
+        "💎 <b>ᴍʏ ᴘʟᴀɴ</b>\n\n"
+        "🔴 ꜱᴛᴀᴛᴜꜱ: ꜰʀᴇᴇ ᴘʟᴀɴ\n\n"
+        "⚡ ꜱʜᴏʀᴛᴇɴᴇʀ ʙʏᴘᴀꜱꜱ: ᴅɪꜱᴀʙʟᴇᴅ\n\n"
+        "💎 ɢᴇᴛ ᴘʀᴇᴍɪᴜᴍ ᴛᴏ ᴇɴᴊᴏʏ ꜱʜᴏʀᴛᴇɴᴇʀ-ꜰʀᴇᴇ ᴅᴏᴡɴʟᴏᴀᴅꜱ.\n\n"
+        "ᴄᴏɴᴛᴀᴄᴛ: @ɪᴛꜱ_ʟᴏᴢᴏ",
+        parse_mode="HTML"
+    )
 
     try:
         start = datetime.fromisoformat(

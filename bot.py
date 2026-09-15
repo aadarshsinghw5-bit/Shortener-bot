@@ -389,11 +389,49 @@ async def broadcast(update,context):
     stats=(f"📢 <b>BROADCAST COMPLETED!</b>\n\n📊 <b>Stats Report:</b>\n• Total Users DB: {total}\n• Successful: {success}\n• Blocked Users Wiped: {blocked}\n• Deleted Accounts Wiped: 0\n• Unsuccessful/Failed: {failed}\n\n⚙️ Config Mode: {mode}\n⏱ Task Lifespan: {lifespan}")
     await update.message.reply_text(stats,parse_mode="HTML")
 
-async def channel_post_indexer(update,context):
-    post=update.channel_post
-    if post and post.chat_id==DB_CHANNEL_ID:
-        try:db.add_file(DB_CHANNEL_ID,post.message_id,post.caption or post.text or "")
-        except Exception:log.exception("Indexing failed")
+async def channel_post_indexer(update, context):
+    post = update.channel_post
+
+    if not post or post.chat_id != DB_CHANNEL_ID:
+        return
+
+    try:
+        # Save the channel message in database
+        file_id = db.add_file(
+            DB_CHANNEL_ID,
+            post.message_id,
+            post.caption or post.text or ""
+        )
+
+        # Create deeplink for this exact message
+        token = db.create_main_link(
+            f"message:{DB_CHANNEL_ID}:{post.message_id}"
+        )
+
+        url = main_link_url(token)
+
+        # Share button
+        markup = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "↗ ꜱʜᴀʀᴇ ᴜʀʟ",
+                    url=share_url(url)
+                )
+            ]
+        ])
+
+        # Put share button below the original DB channel message
+        try:
+            await context.bot.edit_message_reply_markup(
+                chat_id=DB_CHANNEL_ID,
+                message_id=post.message_id,
+                reply_markup=markup
+            )
+        except Exception:
+            log.exception("Could not add share button to DB message")
+
+    except Exception:
+        log.exception("DB channel indexing failed")
 
 def main():
     threading.Thread(target=start_health_server,daemon=True).start()

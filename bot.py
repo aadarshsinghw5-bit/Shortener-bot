@@ -344,14 +344,14 @@ async def myplan(update, context):
     plan = db.get_premium(uid)
 
     if not plan:
-    return await update.message.reply_text(
-        "💎 <b>ᴍʏ ᴘʟᴀɴ</b>\n\n"
-        "🔴 ꜱᴛᴀᴛᴜꜱ: ꜰʀᴇᴇ ᴘʟᴀɴ\n\n"
-        "⚡ ꜱʜᴏʀᴛᴇɴᴇʀ ʙʏᴘᴀꜱꜱ: ᴅɪꜱᴀʙʟᴇᴅ\n\n"
-        "💎 ɢᴇᴛ ᴘʀᴇᴍɪᴜᴍ ᴛᴏ ᴇɴᴊᴏʏ ꜱʜᴏʀᴛᴇɴᴇʀ-ꜰʀᴇᴇ ᴅᴏᴡɴʟᴏᴀᴅꜱ.\n\n"
-        "ᴄᴏɴᴛᴀᴄᴛ: @ɪᴛꜱ_ʟᴏᴢᴏ",
-        parse_mode="HTML"
-    )
+        return await update.message.reply_text(
+            "💎 <b>ᴍʏ ᴘʟᴀɴ</b>\n\n"
+            "🔴 ꜱᴛᴀᴛᴜꜱ: ꜰʀᴇᴇ ᴘʟᴀɴ\n\n"
+            "⚡ ꜱʜᴏʀᴛᴇɴᴇʀ ʙʏᴘᴀꜱꜱ: ᴅɪꜱᴀʙʟᴇᴅ\n\n"
+            "💎 ɢᴇᴛ ᴘʀᴇᴍɪᴜᴍ ᴛᴏ ᴇɴᴊᴏʏ ꜱʜᴏʀᴛᴇɴᴇʀ-ꜰʀᴇᴇ ᴅᴏᴡɴʟᴏᴀᴅꜱ.\n\n"
+            "ᴄᴏɴᴛᴀᴄᴛ: @ɪᴛꜱ_ʟᴏᴢᴏ",
+            parse_mode="HTML"
+        )
 
     try:
         start = datetime.fromisoformat(
@@ -369,7 +369,6 @@ async def myplan(update, context):
             expiry = expiry.replace(tzinfo=timezone.utc)
 
         now = datetime.now(timezone.utc)
-
         remaining = expiry - now
 
         total_seconds = max(0, int(remaining.total_seconds()))
@@ -418,9 +417,10 @@ async def myplan(update, context):
 
     except Exception:
         log.exception("Myplan failed")
+
         return await update.message.reply_text(
             "❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ʟᴏᴀᴅ ʏᴏᴜʀ ᴘʟᴀɴ ᴅᴇᴛᴀɪʟꜱ."
-        )
+    )
         
 async def list_premium(update,context):
     if not admin_ok(update.effective_user.id):return await update.message.reply_text("❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ.")

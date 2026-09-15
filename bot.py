@@ -199,8 +199,8 @@ async def deliver_and_notify(update, context, target):
         msg = await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=(
-                f"This File is deleting automatically in {mins} minutes.\n\n"
-                f"Forward in your Saved Messages..!"
+    f"ᴛʜɪꜱ ꜰɪʟᴇ ɪꜱ ᴅᴇʟᴇᴛɪɴɢ ᴀᴜᴛᴏᴍᴀᴛɪᴄᴀʟʟʏ ɪɴ {mins} ᴍɪɴᴜᴛᴇꜱ.\n\n"
+    f"ꜰᴏʀᴡᴀʀᴅ ɪᴛ ᴛᴏ ʏᴏᴜʀ ꜱᴀᴠᴇᴅ ᴍᴇꜱꜱᴀɢᴇꜱ..!"
             )
         )
 

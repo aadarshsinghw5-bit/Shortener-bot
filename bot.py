@@ -1,3 +1,4 @@
+⁸
 import os
 import logging
 import re
@@ -113,7 +114,23 @@ def settings_keyboard():
         [InlineKeyboardButton("👮 ᴀᴅᴍɪɴꜱ", callback_data="admins"), InlineKeyboardButton("📢 ꜰꜱᴜʙ", callback_data="fsub")],
         [InlineKeyboardButton("✖️ ᴄʟᴏꜱᴇ", callback_data="settings_close")]])
 
-def settings_text(): return "<b>⚙️ ꜱᴇᴛᴛɪɴɢꜱ</b>\n\nᴄʜᴏᴏꜱᴇ ᴀɴ ᴏᴘᴛɪᴏɴ."
+def settings_text():
+    return "<b>⚙️ ꜱᴇᴛᴛɪɴɢꜱ</b>\n\nᴄʜᴏᴏꜱᴇ ᴀɴ ᴏᴘᴛɪᴏɴ."
+
+
+async def settings(update, context):
+    uid = update.effective_user.id
+
+    if not admin_ok(uid):
+        return await update.message.reply_text(
+            "❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ"
+        )
+
+    return await update.message.reply_text(
+        settings_text(),
+        parse_mode="HTML",
+        reply_markup=settings_keyboard()
+    )
 
 async def genlink(update, context):
     if not admin_ok(update.effective_user.id): return await update.message.reply_text("❌ ʏᴏᴜ ᴀʀᴇ ɴᴏᴛ ᴀᴜᴛʜᴏʀɪᴢᴇᴅ.")

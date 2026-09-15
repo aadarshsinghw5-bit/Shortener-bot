@@ -338,6 +338,89 @@ async def removesubs(update,context):
         except Exception:pass
     await update.message.reply_text(f"✅ ᴘʀᴇᴍɪᴜᴍ ʀᴇᴍᴏᴠᴇᴅ.\n\nᴜꜱᴇʀ: <code>{uid}</code>",parse_mode="HTML")
 
+async def myplan(update, context):
+    uid = update.effective_user.id
+
+    plan = db.get_premium(uid)
+
+    if not plan:
+        return await update.message.reply_text(
+            "💎 <b>ᴍʏ ᴘʟᴀɴ</b>\n\n"
+            "🔴 ꜱᴛᴀᴛᴜꜱ: ꜰʀᴇᴇ ᴘʟᴀɴ\n\n"
+            "⚡ ꜱʜᴏʀᴛᴇɴᴇʀ ʙʏᴘᴀꜱꜱ: ᴅɪꜱᴀʙʟᴇᴅ\n\n"
+            "💎 ɢᴇᴛ ᴘʀᴇᴍɪᴜᴍ ᴛᴏ ᴇɴᴊᴏʏ ꜱʜᴏʀᴛᴇɴᴇʀ-ꜰʀᴇᴇ ᴅᴏᴡɴʟᴏᴀᴅꜱ.",
+            parse_mode="HTML"
+        )
+
+    try:
+        start = datetime.fromisoformat(
+            plan["starts_at"].replace("Z", "+00:00")
+        )
+
+        expiry = datetime.fromisoformat(
+            plan["expires_at"].replace("Z", "+00:00")
+        )
+
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+
+        now = datetime.now(timezone.utc)
+
+        remaining = expiry - now
+
+        total_seconds = max(0, int(remaining.total_seconds()))
+
+        days = total_seconds // 86400
+        hours = (total_seconds % 86400) // 3600
+        minutes = (total_seconds % 3600) // 60
+
+        start_text = start.astimezone(IST).strftime(
+            "%d-%m-%Y %I:%M:%S %p"
+        )
+
+        expiry_text = expiry.astimezone(IST).strftime(
+            "%d-%m-%Y %I:%M:%S %p"
+        )
+
+        if total_seconds <= 0:
+            return await update.message.reply_text(
+                "💎 <b>ᴍʏ ᴘʟᴀɴ</b>\n\n"
+                "🔴 ꜱᴛᴀᴛᴜꜱ: ᴘʀᴇᴍɪᴜᴍ ᴇxᴘɪʀᴇᴅ\n\n"
+                "⚡ ꜱʜᴏʀᴛᴇɴᴇʀ ʙʏᴘᴀꜱꜱ: ᴅɪꜱᴀʙʟᴇᴅ",
+                parse_mode="HTML"
+            )
+
+        remaining_text = (
+            f"{days} ᴅᴀʏꜱ, {hours} ʜᴏᴜʀꜱ, {minutes} ᴍɪɴᴜᴛᴇꜱ"
+        )
+
+        text = (
+            "💎 <b>ᴍʏ ᴘʟᴀɴ</b>\n\n"
+            "🟢 ꜱᴛᴀᴛᴜꜱ: ᴘʀᴇᴍɪᴜᴍ ᴀᴄᴛɪᴠᴇ\n\n"
+            f"📅 ᴀᴄᴛɪᴠᴀᴛᴇᴅ ᴏɴ:\n"
+            f"<code>{start_text} IST</code>\n\n"
+            f"⏳ ᴇxᴘɪʀᴇꜱ ᴏɴ:\n"
+            f"<code>{expiry_text} IST</code>\n\n"
+            f"📆 ᴛɪᴍᴇ ʀᴇᴍᴀɪɴɪɴɢ:\n"
+            f"<code>{remaining_text}</code>\n\n"
+            "⚡ ꜱʜᴏʀᴛᴇɴᴇʀ ʙʏᴘᴀꜱꜱ: ᴇɴᴀʙʟᴇᴅ\n\n"
+            "ᴛʜᴀɴᴋ ʏᴏᴜ ꜰᴏʀ ᴜꜱɪɴɢ ᴏᴜʀ ꜱᴇʀᴠɪᴄᴇ ❤️"
+        )
+
+        return await update.message.reply_text(
+            text,
+            parse_mode="HTML"
+        )
+
+    except Exception:
+        log.exception("Myplan failed")
+        return await update.message.reply_text(
+            "❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ʟᴏᴀᴅ ʏᴏᴜʀ ᴘʟᴀɴ ᴅᴇᴛᴀɪʟꜱ."
+        )
+        
 async def list_premium(update,context):
     if not admin_ok(update.effective_user.id):return await update.message.reply_text("❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ.")
     rows=db.list_premium()
@@ -438,6 +521,7 @@ def main():
     app=Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start",start));app.add_handler(CommandHandler("genlink",genlink));app.add_handler(CommandHandler("batch",batch));app.add_handler(CommandHandler("settings",settings))
     app.add_handler(CommandHandler("addsubs",addsubs));app.add_handler(CommandHandler("removesubs",removesubs));app.add_handler(CommandHandler("list_premium",list_premium));app.add_handler(CommandHandler("users",users));app.add_handler(CommandHandler("broadcast",broadcast))
+    app.add_handler(CommandHandler("myplan",myplan))
     app.add_handler(CallbackQueryHandler(callback))
     app.add_handler(MessageHandler(filters.PHOTO | (filters.TEXT & ~filters.COMMAND),settings_input),group=1)
     app.add_handler(MessageHandler(filters.ALL,channel_post_indexer),group=10)

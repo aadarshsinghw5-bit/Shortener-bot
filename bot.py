@@ -345,13 +345,14 @@ async def myplan(update, context):
 
     if not plan:
         return await update.message.reply_text(
-            "💎 <b>ᴍʏ ᴘʟᴀɴ</b>\n\n"
-            "🔴 ꜱᴛᴀᴛᴜꜱ: ꜰʀᴇᴇ ᴘʟᴀɴ\n\n"
-            "⚡ ꜱʜᴏʀᴛᴇɴᴇʀ ʙʏᴘᴀꜱꜱ: ᴅɪꜱᴀʙʟᴇᴅ\n\n"
-            "💎 ɢᴇᴛ ᴘʀᴇᴍɪᴜᴍ ᴛᴏ ᴇɴᴊᴏʏ ꜱʜᴏʀᴛᴇɴᴇʀ-ꜰʀᴇᴇ ᴅᴏᴡɴʟᴏᴀᴅꜱ.\n\n"
-            'ᴄᴏɴᴛᴀᴄᴛ: <a href="https://t.me/Its_Lozo">@ɪᴛꜱ_ʟᴏᴢᴏ</a>',
-            parse_mode="HTML"
-        )
+    "💎 <b>ᴍʏ ᴘʟᴀɴ</b>\n\n"
+    "🔴 ꜱᴛᴀᴛᴜꜱ: ꜰʀᴇᴇ ᴘʟᴀɴ\n\n"
+    "⚡ ꜱʜᴏʀᴛᴇɴᴇʀ ʙʏᴘᴀꜱꜱ: ᴅɪꜱᴀʙʟᴇᴅ\n\n"
+    "💎 ɢᴇᴛ ᴘʀᴇᴍɪᴜᴍ ᴛᴏ ᴇɴᴊᴏʏ ꜱʜᴏʀᴛᴇɴᴇʀ-ꜰʀᴇᴇ ᴅᴏᴡɴʟᴏᴀᴅꜱ.\n\n"
+    'ᴄᴏɴᴛᴀᴄᴛ: <a href="https://t.me/Its_Lozo">@ɪᴛꜱ_ʟᴏᴢᴏ</a>',
+    parse_mode="HTML",
+    link_preview_options=LinkPreviewOptions(is_disabled=True)
+)
 
     try:
         start = datetime.fromisoformat(

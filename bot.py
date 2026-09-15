@@ -250,69 +250,417 @@ async def start(update,context):
         if a.startswith("link_"):return await open_main(update,context,a[5:])
     await render_start(update.message)
 
-async def callback(update,context):
-    q=update.callback_query; await q.answer(); uid=q.from_user.id
-    if q.data in ("close","settings_close"):
-        try:await q.message.delete()
-        except:pass
+asyncasync def callback(update, context):
+    q = update.callback_query
+    await q.answer()
+
+    uid = q.from_user.id
+
+    # =========================
+    # CLOSE
+    # =========================
+    if q.data in ("close", "settings_close"):
+        try:
+            await q.message.delete()
+        except:
+            pass
         return
-    if q.data=="about":return await edit_about(q)
-    if q.data=="back":return await edit_start(q)
-    if q.data=="check_fsub":
-        missing=await is_fsub_member(context.bot,uid)
-        if missing:return await q.answer("❌ ᴊᴏɪɴ ᴀʟʟ ᴄʜᴀɴɴᴇʟꜱ ꜰɪʀꜱᴛ.",show_alert=True)
-        try:await q.message.delete()
-        except:pass
+
+    # =========================
+    # ABOUT
+    # =========================
+    if q.data == "about":
+        return await edit_about(q)
+
+    # =========================
+    # BACK
+    # =========================
+    if q.data == "back":
+        return await edit_start(q)
+
+    # =========================
+    # F-SUB CHECK
+    # =========================
+    if q.data == "check_fsub":
+        missing = await is_fsub_member(context.bot, uid)
+
+        if missing:
+            return await q.answer(
+                "❌ ᴊᴏɪɴ ᴀʟʟ ᴄʜᴀɴɴᴇʟꜱ ꜰɪʀꜱᴛ.",
+                show_alert=True
+            )
+
+        try:
+            await q.message.delete()
+        except:
+            pass
+
         return await render_start(q.message)
-    if not admin_ok(uid):return await q.answer("❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ",show_alert=True)
-    if q.data=="set_image":_pending_image.add(uid);return await q.message.reply_text("🖼️ ʟᴇᴛ ᴍᴇ ʜᴀᴠᴇ ᴛʜᴇ ɪᴍᴀɢᴇ ʏᴏᴜ ᴡᴀɴᴛ ᴛᴏ ᴜꜱᴇ ᴀꜱ ꜱᴛᴀʀᴛ ɪᴍᴀɢᴇ.")
-    if q.data=="auto_delete":
-        cur=auto_delete_minutes();_pending_autodelete.add(uid);return await q.message.reply_text(f"🗑️ ᴀᴜᴛᴏ ᴅᴇʟᴇᴛᴇ ᴛɪᴍᴇ: <b>{cur} ᴍɪɴᴜᴛᴇꜱ</b>\n\nꜱᴇɴᴅ ᴛʜᴇ ɴᴇᴡ ᴛɪᴍᴇ ɪɴ ᴍɪɴᴜᴛᴇꜱ.\nꜱᴇɴᴅ <code>0</code> ᴛᴏ ᴅɪꜱᴀʙʟᴇ.",parse_mode="HTML")
-    if q.data=="admins":
-        lines=["<b>👮 ᴀᴅᴍɪɴꜱ</b>","",f"• <a href=\"tg://user?id={OWNER_ID}\">ᴏᴡɴᴇʀ</a> — <code>{OWNER_ID}</code>"]
-        for a in db.list_admins():lines.append(f"• <a href=\"tg://user?id={a['user_id']}\">{a['first_name'] or ('@'+a['username'] if a['username'] else 'ᴀᴅᴍɪɴ')}</a> — <code>{a['user_id']}</code>")
-        return await q.message.edit_text("\n".join(lines),parse_mode="HTML",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ ᴀᴅᴅ ᴀᴅᴍɪɴ",callback_data="add_admin"),InlineKeyboardButton("➖ ʀᴇᴍᴏᴠᴇ",callback_data="remove_admin")],[InlineKeyboardButton("↩️ ʙᴀᴄᴋ",callback_data="settings_back")]]))
-    if q.data=="add_admin":_pending_admin.add(uid);return await q.message.reply_text("➕ ꜱᴇɴᴅ ᴛʜᴇ ᴜꜱᴇʀ ɪᴅ ᴛᴏ ᴀᴅᴅ ᴀꜱ ᴀᴅᴍɪɴ.")
-    if q.data=="remove_admin":_pending_admin.add(-uid);return await q.message.reply_text("➖ ꜱᴇɴᴅ ᴛʜᴇ ᴜꜱᴇʀ ɪᴅ ᴛᴏ ʀᴇᴍᴏᴠᴇ ᴀɴ ᴀᴅᴍɪɴ.")
-    if q.data=="fsub":
-        rows=db.list_fsub();lines=["<b>📢 ꜰꜱᴜʙ ᴄʜᴀɴɴᴇʟꜱ</b>",""]
-        for r in rows:lines.append(f"• <a href=\"{r.get('invite_link','')}\">{r.get('title','ᴄʜᴀɴɴᴇʟ')}</a> — <code>{r['channel_id']}</code>")
-        kb=InlineKeyboardMarkup([[InlineKeyboardButton("➕ ᴀᴅᴅ ꜰꜱᴜʙ",callback_data="add_fsub")],[InlineKeyboardButton("➖ ʀᴇᴍᴏᴠᴇ ꜰꜱᴜʙ",callback_data="remove_fsub")],[InlineKeyboardButton("↩️ ʙᴀᴄᴋ",callback_data="settings_back")]])
-        return await q.message.edit_text("\n".join(lines),parse_mode="HTML",reply_markup=kb)
-    if q.data=="add_fsub":_pending_fsub.add(uid);return await q.message.reply_text("📢 ꜱᴇɴᴅ ᴛʜᴇ ᴄʜᴀɴɴᴇʟ ɪᴅ ᴏɴʟʏ.\nᴛʜᴇ ʙᴏᴛ ᴡɪʟʟ ɢᴇᴛ ᴛʜᴇ ᴄʜᴀɴɴᴇʟ ɴᴀᴍᴇ ᴀɴᴅ ɪɴᴠɪᴛᴇ ʟɪɴᴋ ᴀᴜᴛᴏᴍᴀᴛɪᴄᴀʟʟʏ.")
-    if q.data=="remove_fsub":_pending_fsub.add(uid*1000000000+1);return await q.message.reply_text("➖ ꜱᴇɴᴅ ᴛʜᴇ ꜰꜱᴜʙ ᴄʜᴀɴɴᴇʟ ɪᴅ ᴛᴏ ʀᴇᴍᴏᴠᴇ.")
-    if q.data=="settings_back":return await q.message.edit_text(settings_text(),parse_mode="HTML",reply_markup=settings_keyboard())
 
-async def settings(update,context):
-    if not admin_ok(update.effective_user.id):return await update.message.reply_text("❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ.")
-    await update.message.reply_text(settings_text(),parse_mode="HTML",reply_markup=settings_keyboard())
+    # =========================
+    # ADMIN CHECK
+    # =========================
+    if not admin_ok(uid):
+        return await q.answer(
+            "❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ",
+            show_alert=True
+        )
 
-async def settings_input(update,context):
-    uid=update.effective_user.id
-    if not admin_ok(uid):return
+    # =========================
+    # SET START IMAGE
+    # ADMIN + OWNER
+    # =========================
+    if q.data == "set_image":
+        _pending_image.add(uid)
+
+        return await q.message.reply_text(
+            "🖼️ ʟᴇᴛ ᴍᴇ ʜᴀᴠᴇ ᴛʜᴇ ɪᴍᴀɢᴇ ʏᴏᴜ ᴡᴀɴᴛ ᴛᴏ ᴜꜱᴇ ᴀꜱ ꜱᴛᴀʀᴛ ɪᴍᴀɢᴇ."
+        )
+
+    # =========================
+    # AUTO DELETE
+    # ADMIN + OWNER
+    # =========================
+    if q.data == "auto_delete":
+        cur = auto_delete_minutes()
+
+        _pending_autodelete.add(uid)
+
+        return await q.message.reply_text(
+            f"🗑️ ᴀᴜᴛᴏ ᴅᴇʟᴇᴛᴇ ᴛɪᴍᴇ: "
+            f"<b>{cur} ᴍɪɴᴜᴛᴇꜱ</b>\n\n"
+            f"ꜱᴇɴᴅ ᴛʜᴇ ɴᴇᴡ ᴛɪᴍᴇ ɪɴ ᴍɪɴᴜᴛᴇꜱ.\n"
+            f"ꜱᴇɴᴅ <code>0</code> ᴛᴏ ᴅɪꜱᴀʙʟᴇ.",
+            parse_mode="HTML"
+        )
+
+    # =========================
+    # ADMINS LIST
+    # ADMIN + OWNER
+    # =========================
+    if q.data == "admins":
+
+        lines = [
+            "<b>👮 ᴀᴅᴍɪɴꜱ</b>",
+            "",
+            f'• <a href="tg://user?id={OWNER_ID}">'
+            f"ᴏᴡɴᴇʀ</a> — <code>{OWNER_ID}</code>"
+        ]
+
+        for a in db.list_admins():
+            name = (
+                a["first_name"]
+                or ("@" + a["username"] if a["username"] else "ᴀᴅᴍɪɴ")
+            )
+
+            lines.append(
+                f'• <a href="tg://user?id={a["user_id"]}">'
+                f"{name}</a> — <code>{a['user_id']}</code>"
+            )
+
+        return await q.message.edit_text(
+            "\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "➕ ᴀᴅᴅ ᴀᴅᴍɪɴ",
+                        callback_data="add_admin"
+                    ),
+                    InlineKeyboardButton(
+                        "➖ ʀᴇᴍᴏᴠᴇ",
+                        callback_data="remove_admin"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "↩️ ʙᴀᴄᴋ",
+                        callback_data="settings_back"
+                    )
+                ]
+            ])
+        )
+
+    # =========================
+    # ADD ADMIN
+    # OWNER ONLY
+    # =========================
+    if q.data == "add_admin":
+
+        if uid != OWNER_ID:
+            return await q.answer(
+                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ᴀᴅᴅ ᴀᴅᴍɪɴꜱ.",
+                show_alert=True
+            )
+
+        _pending_admin.add(uid)
+
+        return await q.message.reply_text(
+            "➕ ꜱᴇɴᴅ ᴛʜᴇ ᴜꜱᴇʀ ɪᴅ ᴛᴏ ᴀᴅᴅ ᴀꜱ ᴀᴅᴍɪɴ."
+        )
+
+    # =========================
+    # REMOVE ADMIN
+    # OWNER ONLY
+    # =========================
+    if q.data == "remove_admin":
+
+        if uid != OWNER_ID:
+            return await q.answer(
+                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ʀᴇᴍᴏᴠᴇ ᴀᴅᴍɪɴꜱ.",
+                show_alert=True
+            )
+
+        _pending_admin.add(-uid)
+
+        return await q.message.reply_text(
+            "➖ ꜱᴇɴᴅ ᴛʜᴇ ᴜꜱᴇʀ ɪᴅ ᴛᴏ ʀᴇᴍᴏᴠᴇ ᴀɴ ᴀᴅᴍɪɴ."
+        )
+
+    # =========================
+    # F-SUB LIST
+    # ADMIN + OWNER
+    # =========================
+    if q.data == "fsub":
+
+        rows = db.list_fsub()
+
+        lines = [
+            "<b>📢 ꜰꜱᴜʙ ᴄʜᴀɴɴᴇʟꜱ</b>",
+            ""
+        ]
+
+        for r in rows:
+            lines.append(
+                f'• <a href="{r.get("invite_link", "")}">'
+                f'{r.get("title", "ᴄʜᴀɴɴᴇʟ")}</a> — '
+                f'<code>{r["channel_id"]}</code>'
+            )
+
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "➕ ᴀᴅᴅ ꜰꜱᴜʙ",
+                    callback_data="add_fsub"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "➖ ʀᴇᴍᴏᴠᴇ ꜰꜱᴜʙ",
+                    callback_data="remove_fsub"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "↩️ ʙᴀᴄᴋ",
+                    callback_data="settings_back"
+                )
+            ]
+        ])
+
+        return await q.message.edit_text(
+            "\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=kb
+        )
+
+    # =========================
+    # ADD F-SUB
+    # OWNER ONLY
+    # =========================
+    if q.data == "add_fsub":
+
+        if uid != OWNER_ID:
+            return await q.answer(
+                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ᴀᴅᴅ ꜰꜱᴜʙ.",
+                show_alert=True
+            )
+
+        _pending_fsub.add(uid)
+
+        return await q.message.reply_text(
+            "📢 ꜱᴇɴᴅ ᴛʜᴇ ᴄʜᴀɴɴᴇʟ ɪᴅ ᴏɴʟʏ.\n"
+            "ᴛʜᴇ ʙᴏᴛ ᴡɪʟʟ ɢᴇᴛ ᴛʜᴇ ᴄʜᴀɴɴᴇʟ ɴᴀᴍᴇ ᴀɴᴅ "
+            "ɪɴᴠɪᴛᴇ ʟɪɴᴋ ᴀᴜᴛᴏᴍᴀᴛɪᴄᴀʟʟʏ."
+        )
+
+    # =========================
+    # REMOVE F-SUB
+    # OWNER ONLY
+    # =========================
+    if q.data == "remove_fsub":
+
+        if uid != OWNER_ID:
+            return await q.answer(
+                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ʀᴇᴍᴏᴠᴇ ꜰꜱᴜʙ.",
+                show_alert=True
+            )
+
+        _pending_fsub.add(
+            uid * 1000000000 + 1
+        )
+
+        return await q.message.reply_text(
+            "➖ ꜱᴇɴᴅ ᴛʜᴇ ꜰꜱᴜʙ ᴄʜᴀɴɴᴇʟ ɪᴅ ᴛᴏ ʀᴇᴍᴏᴠᴇ."
+        )
+
+    # =========================
+    # SETTINGS BACK
+    # =========================
+    if q.data == "settings_back":
+        return await q.message.edit_text(
+            settings_text(),
+            parse_mode="HTML",
+            reply_markup=settings_keyboard()
+        )
+
+async def settings_input(update, context):
+    uid = update.effective_user.id
+
+    if not admin_ok(uid):
+        return
+
+    # 🖼️ Start Image — Admin + Owner
     if uid in _pending_image and update.message.photo:
-        db.set_setting("start_image",update.message.photo[-1].file_id);_pending_image.discard(uid);return await update.message.reply_text("✅ ꜱᴛᴀʀᴛ ɪᴍᴀɢᴇ ᴜᴘᴅᴀᴛᴇᴅ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ.")
+        db.set_setting(
+            "start_image",
+            update.message.photo[-1].file_id
+        )
+        _pending_image.discard(uid)
+
+        return await update.message.reply_text(
+            "✅ ꜱᴛᴀʀᴛ ɪᴍᴀɢᴇ ᴜᴘᴅᴀᴛᴇᴅ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ."
+        )
+
+    # 🗑️ Auto Delete — Admin + Owner
     if uid in _pending_autodelete:
         try:
-            minutes=max(0,int(update.message.text.strip()));db.set_setting("auto_delete_minutes",minutes);_pending_autodelete.discard(uid);return await update.message.reply_text(f"✅ ᴀᴜᴛᴏ ᴅᴇʟᴇᴛᴇ ꜱᴇᴛ ᴛᴏ {minutes} ᴍɪɴᴜᴛᴇꜱ.")
-        except:return await update.message.reply_text("❌ ꜱᴇɴᴅ ᴀ ᴠᴀʟɪᴅ ɴᴜᴍʙᴇʀ.")
+            minutes = max(0, int(update.message.text.strip()))
+
+            db.set_setting(
+                "auto_delete_minutes",
+                minutes
+            )
+
+            _pending_autodelete.discard(uid)
+
+            return await update.message.reply_text(
+                f"✅ ᴀᴜᴛᴏ ᴅᴇʟᴇᴛᴇ ꜱᴇᴛ ᴛᴏ {minutes} ᴍɪɴᴜᴛᴇꜱ."
+            )
+
+        except Exception:
+            return await update.message.reply_text(
+                "❌ ꜱᴇɴᴅ ᴀ ᴠᴀʟɪᴅ ɴᴜᴍʙᴇʀ."
+            )
+
+    # 👮 Add / Remove Admin — OWNER ONLY
     if uid in _pending_admin or -uid in _pending_admin:
-        try:t=int(update.message.text.strip())
-        except:return await update.message.reply_text("❌ ᴇɴᴛᴇʀ ᴀ ᴠᴀʟɪᴅ ᴜꜱᴇʀ ɪᴅ.")
-        rem=-uid in _pending_admin;_pending_admin.discard(uid);_pending_admin.discard(-uid)
-        if rem:db.remove_admin(t);return await update.message.reply_text("✅ ᴀᴅᴍɪɴ ʀᴇᴍᴏᴠᴇᴅ.")
-        db.add_admin(t);return await update.message.reply_text("✅ ᴀᴅᴍɪɴ ᴀᴅᴅᴇᴅ.")
-    if uid in _pending_fsub:
+
+        if uid != OWNER_ID:
+            _pending_admin.discard(uid)
+            _pending_admin.discard(-uid)
+
+            return await update.message.reply_text(
+                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ᴀᴅᴅ ᴏʀ ʀᴇᴍᴏᴠᴇ ᴀᴅᴍɪɴꜱ."
+            )
+
         try:
-            cid=int(update.message.text.strip()); chat=await context.bot.get_chat(cid); invite=await context.bot.create_chat_invite_link(cid,name="File Store FSub")
-            db.add_fsub(cid,invite.invite_link,chat.title or chat.username or str(cid));_pending_fsub.discard(uid)
-            return await update.message.reply_text(f"✅ <b>ꜰꜱᴜʙ ᴀᴅᴅᴇᴅ</b>\n\n📢 <a href=\"{invite.invite_link}\">{chat.title or 'Channel'}</a>\n🆔 <code>{cid}</code>\n🔗 <a href=\"{invite.invite_link}\">ɪɴᴠɪᴛᴇ ʟɪɴᴋ</a>",parse_mode="HTML")
+            target_uid = int(update.message.text.strip())
+        except Exception:
+            return await update.message.reply_text(
+                "❌ ᴇɴᴛᴇʀ ᴀ ᴠᴀʟɪᴅ ᴜꜱᴇʀ ɪᴅ."
+            )
+
+        remove_mode = -uid in _pending_admin
+
+        _pending_admin.discard(uid)
+        _pending_admin.discard(-uid)
+
+        if remove_mode:
+            db.remove_admin(target_uid)
+
+            return await update.message.reply_text(
+                "✅ ᴀᴅᴍɪɴ ʀᴇᴍᴏᴠᴇᴅ."
+            )
+
+        db.add_admin(target_uid)
+
+        return await update.message.reply_text(
+            "✅ ᴀᴅᴍɪɴ ᴀᴅᴅᴇᴅ."
+        )
+
+    # 📢 Add FSub — OWNER ONLY
+    if uid in _pending_fsub:
+
+        if uid != OWNER_ID:
+            _pending_fsub.discard(uid)
+
+            return await update.message.reply_text(
+                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ᴀᴅᴅ ꜰꜱᴜʙ."
+            )
+
+        try:
+            cid = int(update.message.text.strip())
+
+            chat = await context.bot.get_chat(cid)
+
+            invite = await context.bot.create_chat_invite_link(
+                cid,
+                name="File Store FSub"
+            )
+
+            db.add_fsub(
+                cid,
+                invite.invite_link,
+                chat.title or chat.username or str(cid)
+            )
+
+            _pending_fsub.discard(uid)
+
+            return await update.message.reply_text(
+                f"✅ <b>ꜰꜱᴜʙ ᴀᴅᴅᴇᴅ</b>\n\n"
+                f"📢 <a href=\"{invite.invite_link}\">"
+                f"{chat.title or 'Channel'}</a>\n"
+                f"🆔 <code>{cid}</code>\n"
+                f"🔗 <a href=\"{invite.invite_link}\">ɪɴᴠɪᴛᴇ ʟɪɴᴋ</a>",
+                parse_mode="HTML"
+            )
+
         except Exception as e:
-            return await update.message.reply_text(f"❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ᴀᴅᴅ ᴛʜɪꜱ ᴄʜᴀɴɴᴇʟ. ᴍᴀᴋᴇ ꜱᴜʀᴇ ᴛʜᴇ ʙᴏᴛ ɪꜱ ᴀᴅᴍɪɴ.\n<code>{e}</code>",parse_mode="HTML")
-    remkey=uid*1000000000+1
+            return await update.message.reply_text(
+                "❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ᴀᴅᴅ ᴛʜɪꜱ ᴄʜᴀɴɴᴇʟ.\n"
+                "ᴍᴀᴋᴇ ꜱᴜʀᴇ ᴛʜᴇ ʙᴏᴛ ɪꜱ ᴀᴅᴍɪɴ.\n\n"
+                f"<code>{e}</code>",
+                parse_mode="HTML"
+            )
+
+    # 📢 Remove FSub — OWNER ONLY
+    remkey = uid * 1000000000 + 1
+
     if remkey in _pending_fsub:
-        try:cid=update.message.text.strip();db.del_fsub(cid);_pending_fsub.discard(remkey);return await update.message.reply_text("✅ ꜰꜱᴜʙ ᴄʜᴀɴɴᴇʟ ʀᴇᴍᴏᴠᴇᴅ.")
-        except:return await update.message.reply_text("❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ʀᴇᴍᴏᴠᴇ.")
+
+        if uid != OWNER_ID:
+            _pending_fsub.discard(remkey)
+
+            return await update.message.reply_text(
+                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ʀᴇᴍᴏᴠᴇ ꜰꜱᴜʙ."
+            )
+
+        try:
+            cid = update.message.text.strip()
+
+            db.del_fsub(cid)
+
+            _pending_fsub.discard(remkey)
+
+            return await update.message.reply_text(
+                "✅ ꜰꜱᴜʙ ᴄʜᴀɴɴᴇʟ ʀᴇᴍᴏᴠᴇᴅ."
+            )
+
+        except Exception:
+            return await update.message.reply_text(
+                "❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ʀᴇᴍᴏᴠᴇ."
+            )
 
 async def addsubs(update,context):
     if not admin_ok(update.effective_user.id):return await update.message.reply_text("❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ.")

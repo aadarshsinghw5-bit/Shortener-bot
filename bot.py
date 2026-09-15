@@ -271,10 +271,10 @@ async def callback(update, context):
     
     await q.answer()
     
-    if not admin_ok(uid):
+ if not admin_ok(uid):
     return await q.answer("❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ", show_alert=True)
 
-    if q.data in ("add_admin", "remove_admin") and uid != OWNER_ID:
+if q.data in ("add_admin", "remove_admin") and uid != OWNER_ID:
     return await q.answer(
         "🚫 ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ᴀᴅᴅ/ʀᴇᴍᴏᴠᴇ ᴀᴅᴍɪɴꜱ",
         show_alert=True

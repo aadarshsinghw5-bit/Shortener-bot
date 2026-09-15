@@ -33,10 +33,21 @@ _pending_image = set(); _pending_autodelete = set(); _pending_admin = set(); _pe
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8"); self.end_headers()
-        self.wfile.write(b'{"ok":true,"service":"telegram-file-store-bot"}')
-    def log_message(self, format, *args): pass
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(
+            b'{"ok":true,"service":"telegram-file-store-bot"}'
+        )
 
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", "49")
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        pass
 def start_health_server():
     port = int(os.environ.get("PORT", "10000")); server = HTTPServer(("0.0.0.0", port), HealthHandler)
     log.info("Health server running on port %s", port); server.serve_forever()

@@ -250,7 +250,7 @@ async def start(update,context):
         if a.startswith("link_"):return await open_main(update,context,a[5:])
     await render_start(update.message)
 
-asyncasync def callback(update, context):
+async def callback(update, context):
     q = update.callback_query
     await q.answer()
 

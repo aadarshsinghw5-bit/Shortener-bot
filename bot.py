@@ -192,7 +192,7 @@ async def deliver_and_notify(update,context,target):
     if not ids:return
     mins=auto_delete_minutes()
     if mins>0:
-        notice=await update.message.reply_text(f"⚠️ <b>ᴛʜɪꜱ ꜰɪʟᴇ ɪꜱ ᴅᴇʟᴇᴛɪɴɢ ᴀᴜᴛᴏᴍᴀᴛɪᴄᴀʟʟʏ ɪɴ {mins} ᴍɪɴᴜᴛᴇꜱ.</b>\n\nꜰᴏʀᴡᴀʀᴅ ɪᴛ ᴛᴏ ʏᴏᴜʀ ꜱᴀᴠᴇᴅ ᴍᴇꜱꜱᴀɢᴇꜱ..!")
+        notice= await bot.send_message(chat_id, f"This File is deleting automatically in {minutes} minutes.\n\nForward in your Saved Messages..!")
         ids.append(notice.message_id); context.job_queue.run_once(delete_delivered,mins*60,data={"chat_id":update.effective_chat.id,"message_ids":ids})
 
 async def verify(update,context,token):

@@ -175,3 +175,27 @@ class Database:
         bid = uuid.uuid4().hex[:12]
         self.db.table("broadcasts").insert({"broadcast_id": bid, "message_id": int(message_id), "delete_at": delete_at.isoformat() if delete_at else None}).execute()
         return bid
+
+    
+    def ban_user(self, user_id):
+    self.db.table("banned_users").upsert({
+        "user_id": int(user_id)
+    }).execute()
+
+
+    def unban_user(self, user_id):
+    self.db.table("banned_users").delete().eq(
+        "user_id",
+        int(user_id)
+    ).execute()
+
+
+    def is_banned(self, user_id):
+    result = self.db.table("banned_users").select(
+        "user_id"
+    ).eq(
+        "user_id",
+        int(user_id)
+    ).limit(1).execute()
+
+    return bool(result.data)

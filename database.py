@@ -27,7 +27,7 @@ class Database:
         )
         return r.data or []
 
-        def is_banned(self, user_id):
+    def is_banned(self, user_id):
             r = (
             self.db.table("banned_users")
             .select("user_id")

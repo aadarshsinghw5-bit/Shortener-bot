@@ -28,14 +28,14 @@ class Database:
         return r.data or []
 
     def is_banned(self, user_id):
-        r = (
-            self.db.table("banned_users")
-            .select("user_id")
-            .eq("user_id", int(user_id))
-            .limit(1)
-            .execute()
-        )
-        return bool(r.data)
+    r = (
+        self.db.table("banned_users")
+        .select("user_id")
+        .eq("user_id", int(user_id))
+        .limit(1)
+        .execute()
+    )
+    return bool(r.data)
 
     def ban_user(self, user_id):
         self.db.table("banned_users").upsert({

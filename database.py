@@ -49,7 +49,7 @@ class Database:
         ).execute()
 
     def list_banned_users(self):
-    r = (
+        r = (
         self.db.table("banned_users")
         .select("user_id")
         .order("user_id")

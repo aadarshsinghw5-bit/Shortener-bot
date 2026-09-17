@@ -19,7 +19,7 @@ class Database:
         }).execute()
 
     def list_users(self):
-        r = (
+            r = (
             self.db.table("users")
             .select("*")
             .order("created_at")
@@ -27,15 +27,15 @@ class Database:
         )
         return r.data or []
 
-    def is_banned(self, user_id):
-    r = (
-        self.db.table("banned_users")
-        .select("user_id")
-        .eq("user_id", int(user_id))
-        .limit(1)
-        .execute()
-    )
-    return bool(r.data)
+        def is_banned(self, user_id):
+            r = (
+            self.db.table("banned_users")
+            .select("user_id")
+            .eq("user_id", int(user_id))
+            .limit(1)
+            .execute()
+        )
+        return bool(r.data)
 
     def ban_user(self, user_id):
         self.db.table("banned_users").upsert({
@@ -49,13 +49,13 @@ class Database:
         ).execute()
 
     def list_banned_users(self):
-        r = (
-        self.db.table("banned_users")
-        .select("user_id")
-        .order("user_id")
-        .execute()
-    )
-    return r.data or []
+            r = (
+            self.db.table("banned_users")
+            .select("user_id")
+            .order("user_id")
+            .execute()
+        )
+        return r.data or []
 
     def add_admin(self, user_id):
         user_id = int(user_id)
@@ -66,7 +66,7 @@ class Database:
         self.db.table("admins").upsert({
             "user_id": user_id
         }).execute()
-
+        
     def delete_user(self, user_id):
         self.db.table("users").delete().eq(
             "user_id",

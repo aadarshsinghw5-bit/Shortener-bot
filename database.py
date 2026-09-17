@@ -48,6 +48,15 @@ class Database:
             int(user_id)
         ).execute()
 
+    def list_banned_users(self):
+    r = (
+        self.db.table("banned_users")
+        .select("user_id")
+        .order("user_id")
+        .execute()
+    )
+    return r.data or []
+
     def add_admin(self, user_id):
         user_id = int(user_id)
 

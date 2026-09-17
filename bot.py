@@ -856,6 +856,97 @@ async def list_premium(update,context):
     text="\n".join(lines)
     for pos in range(0,len(text),3900): await update.message.reply_text(text[pos:pos+3900],parse_mode="HTML",disable_web_page_preview=True)
 
+async def banuser(update, context):
+    uid = update.effective_user.id
+
+    if not admin_ok(uid):
+        return await update.message.reply_text(
+            "❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ."
+        )
+
+    if len(context.args) != 1:
+        return await update.message.reply_text(
+            "❌ ᴜꜱᴀɢᴇ:\n/banuser USER_ID"
+        )
+
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        return await update.message.reply_text(
+            "❌ ᴘʟᴇᴀꜱᴇ ᴇɴᴛᴇʀ ᴀ ᴠᴀʟɪᴅ ᴜꜱᴇʀ ɪᴅ."
+        )
+
+    if target_id == OWNER_ID:
+        return await update.message.reply_text(
+            "❌ ᴏᴡɴᴇʀ ᴄᴀɴɴᴏᴛ ʙᴇ ʙᴀɴɴᴇᴅ."
+        )
+
+    if db.is_banned(target_id):
+        return await update.message.reply_text(
+            "⚠️ ᴛʜɪꜱ ᴜꜱᴇʀ ɪꜱ ᴀʟʀᴇᴀᴅʏ ʙᴀɴɴᴇᴅ."
+        )
+
+    db.ban_user(target_id)
+
+    try:
+        await context.bot.send_message(
+            target_id,
+            "🚫 <b>You Are Banned From Using The Bot</b> 🚫",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+
+    await update.message.reply_text(
+        f"✅ <b>ᴜꜱᴇʀ ʙᴀɴɴᴇᴅ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ.</b>\n\n"
+        f"🆔 <code>{target_id}</code>",
+        parse_mode="HTML"
+    )
+
+
+async def unbanuser(update, context):
+    uid = update.effective_user.id
+
+    if not admin_ok(uid):
+        return await update.message.reply_text(
+            "❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ."
+        )
+
+    if len(context.args) != 1:
+        return await update.message.reply_text(
+            "❌ ᴜꜱᴀɢᴇ:\n/unbanuser USER_ID"
+        )
+
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        return await update.message.reply_text(
+            "❌ ᴘʟᴇᴀꜱᴇ ᴇɴᴛᴇʀ ᴀ ᴠᴀʟɪᴅ ᴜꜱᴇʀ ɪᴅ."
+        )
+
+    if not db.is_banned(target_id):
+        return await update.message.reply_text(
+            "⚠️ ᴛʜɪꜱ ᴜꜱᴇʀ ɪꜱ ɴᴏᴛ ʙᴀɴɴᴇᴅ."
+        )
+
+    db.unban_user(target_id)
+
+    try:
+        await context.bot.send_message(
+            target_id,
+            "✅ <b>Your ban has been removed.</b>\n\n"
+            "You can use the bot again.",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+
+    await update.message.reply_text(
+        f"✅ <b>ᴜꜱᴇʀ ᴜɴʙᴀɴɴᴇᴅ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ.</b>\n\n"
+        f"🆔 <code>{target_id}</code>",
+        parse_mode="HTML"
+                       )
+    
 async def users(update,context):
     if not admin_ok(update.effective_user.id):return await update.message.reply_text("❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ.")
     rows=db.list_users();lines=[f"<b>👥 ᴜꜱᴇʀꜱ: {len(rows)}</b>",""]
@@ -964,7 +1055,8 @@ def main():
     app.add_handler(CommandHandler("genlink", genlink))
     app.add_handler(CommandHandler("batch", batch))
     app.add_handler(CommandHandler("settings", settings))
-
+    app.add_handler(CommandHandler("banuser", banuser))
+    app.add_handler(CommandHandler("unbanuser", unbanuser))
     app.add_handler(CommandHandler("addsubs", addsubs))
     app.add_handler(CommandHandler("removesubs", removesubs))
     app.add_handler(CommandHandler("list_premium", list_premium))

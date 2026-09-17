@@ -947,6 +947,85 @@ async def unbanuser(update, context):
         parse_mode="HTML"
                        )
     
+async def banuser_list(update, context):
+    uid = update.effective_user.id
+
+    if not admin_ok(uid):
+        return await update.message.reply_text("❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ.")
+
+    banned_users = db.list_banned_users()
+
+    if not banned_users:
+        return await update.message.reply_text(
+            "📋 <b>ᴜɴɢᴀɴɢ ᴜꜱᴇʀ ʟɪꜱᴛ</b>\n\n"
+            "✅ ɴᴏ ᴜꜱᴇʀ ɪꜱ ᴄᴜʀʀᴇɴᴛʟʏ ʙᴀɴɴᴇᴅ.",
+            parse_mode="HTML"
+        )
+
+    lines = [
+        "🚫 <b>ʙᴀɴɴᴇᴅ ᴜꜱᴇʀꜱ</b>",
+        ""
+    ]
+
+    for i, row in enumerate(banned_users, 1):
+        user_id = int(row["user_id"])
+
+        try:
+            user = await context.bot.get_chat(user_id)
+
+            name = user.full_name or "Unknown"
+            username = (
+                f"@{user.username}"
+                if user.username
+                else "No Username"
+            )
+
+            profile_link = f'<a href="tg://user?id={user_id}">{name}</a>'
+
+        except Exception:
+            name = "Unknown"
+            username = "No Username"
+            profile_link = f'<a href="tg://user?id={user_id}">Unknown User</a>'
+
+        lines.append(
+            f"<b>{i}.</b> {profile_link}\n"
+            f"👤 Name: <code>{name}</code>\n"
+            f"🔗 Username: {username}\n"
+            f"🆔 UID: <code>{user_id}</code>\n"
+            f"━━━━━━━━━━━━━━"
+        )
+
+    text = "\n".join(lines)
+
+    # Telegram message limit protection
+    if len(text) <= 4000:
+        return await update.message.reply_text(
+            text,
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+
+    # Split into multiple messages
+    chunk = ""
+
+    for line in lines:
+        if len(chunk) + len(line) + 1 > 4000:
+            await update.message.reply_text(
+                chunk,
+                parse_mode="HTML",
+                disable_web_page_preview=True
+            )
+            chunk = ""
+
+        chunk += line + "\n"
+
+    if chunk:
+        await update.message.reply_text(
+            chunk,
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+
 async def users(update,context):
     if not admin_ok(update.effective_user.id):return await update.message.reply_text("❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ.")
     rows=db.list_users();lines=[f"<b>👥 ᴜꜱᴇʀꜱ: {len(rows)}</b>",""]
@@ -1057,6 +1136,7 @@ def main():
     app.add_handler(CommandHandler("settings", settings))
     app.add_handler(CommandHandler("banuser", banuser))
     app.add_handler(CommandHandler("unbanuser", unbanuser))
+    app.add_handler(CommandHandler("banuser_list", banuser_list))
     app.add_handler(CommandHandler("addsubs", addsubs))
     app.add_handler(CommandHandler("removesubs", removesubs))
     app.add_handler(CommandHandler("list_premium", list_premium))

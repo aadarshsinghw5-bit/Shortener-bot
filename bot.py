@@ -10,7 +10,15 @@ from urllib.parse import quote
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, LinkPreviewOptions
 from telegram.constants import ChatMemberStatus
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ContextTypes,
+    ApplicationHandlerStop,
+    filters,
+)
 
 from database import Database
 from shortener import Shortener
@@ -28,6 +36,37 @@ DB_CHANNEL_ID = int(os.environ["DB_CHANNEL_ID"])
 IST = ZoneInfo("Asia/Kolkata")
 
 db = Database()
+async def ban_guard(update, context):
+    user = update.effective_user
+
+    # Channel posts aur bina user wale updates ignore
+    if not user:
+        return
+
+    # Owner ko ban guard se exempt rakho
+    if user.id == OWNER_ID:
+        return
+
+    try:
+        banned = db.is_banned(user.id)
+    except Exception:
+        log.exception("Ban check failed")
+        return
+
+    if not banned:
+        return
+
+    # Banned user ko exact message
+    if update.message:
+        try:
+            await update.message.reply_text(
+                "🚫You Are Banned From Using The Bot 🚫"
+            )
+        except Exception:
+            pass
+
+    # Baaki handlers ko message process karne se roko
+    raise ApplicationHandlerStop
 shortener = Shortener(db)
 _pending_image = set(); _pending_autodelete = set(); _pending_admin = set(); _pending_fsub = set()
 
@@ -901,13 +940,75 @@ async def channel_post_indexer(update, context):
         log.exception("DB channel indexing failed")
 
 def main():
-    threading.Thread(target=start_health_server,daemon=True).start()
-    app=Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start",start));app.add_handler(CommandHandler("genlink",genlink));app.add_handler(CommandHandler("batch",batch));app.add_handler(CommandHandler("settings",settings))
-    app.add_handler(CommandHandler("addsubs",addsubs));app.add_handler(CommandHandler("removesubs",removesubs));app.add_handler(CommandHandler("list_premium",list_premium));app.add_handler(CommandHandler("users",users));app.add_handler(CommandHandler("broadcast",broadcast))
-    app.add_handler(CommandHandler("myplan",myplan))
-    app.add_handler(CallbackQueryHandler(callback))
-    app.add_handler(MessageHandler(filters.PHOTO | (filters.TEXT & ~filters.COMMAND),settings_input),group=1)
-    app.add_handler(MessageHandler(filters.ALL,channel_post_indexer),group=10)
-    log.info("Bot starting");app.run_polling(allowed_updates=Update.ALL_TYPES,drop_pending_updates=True,close_loop=False)
-if __name__=="__main__":main()
+    threading.Thread(
+        target=start_health_server,
+        daemon=True
+    ).start()
+
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    # =========================
+    # GLOBAL BAN GUARD
+    # =========================
+    # Ye sabse pehle chalega.
+    # Banned user ke messages aage process nahi honge.
+    app.add_handler(
+        MessageHandler(filters.ALL, ban_guard),
+        group=-1
+    )
+
+    # =========================
+    # COMMAND HANDLERS
+    # =========================
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("genlink", genlink))
+    app.add_handler(CommandHandler("batch", batch))
+    app.add_handler(CommandHandler("settings", settings))
+
+    app.add_handler(CommandHandler("addsubs", addsubs))
+    app.add_handler(CommandHandler("removesubs", removesubs))
+    app.add_handler(CommandHandler("list_premium", list_premium))
+    app.add_handler(CommandHandler("users", users))
+    app.add_handler(CommandHandler("broadcast", broadcast))
+    app.add_handler(CommandHandler("myplan", myplan))
+
+    # =========================
+    # CALLBACK HANDLER
+    # =========================
+    app.add_handler(
+        CallbackQueryHandler(callback)
+    )
+
+    # =========================
+    # SETTINGS INPUT
+    # =========================
+    app.add_handler(
+        MessageHandler(
+            filters.PHOTO | (filters.TEXT & ~filters.COMMAND),
+            settings_input
+        ),
+        group=1
+    )
+
+    # =========================
+    # DB CHANNEL INDEXER
+    # =========================
+    app.add_handler(
+        MessageHandler(
+            filters.ALL,
+            channel_post_indexer
+        ),
+        group=10
+    )
+
+    log.info("Bot starting")
+
+    app.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True,
+        close_loop=False
+    )
+
+
+if __name__ == "__main__":
+    main()

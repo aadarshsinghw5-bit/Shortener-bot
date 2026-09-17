@@ -1,6 +1,7 @@
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
+
 from supabase import create_client
 
 
@@ -19,7 +20,7 @@ class Database:
         }).execute()
 
     def list_users(self):
-            r = (
+        r = (
             self.db.table("users")
             .select("*")
             .order("created_at")
@@ -27,8 +28,12 @@ class Database:
         )
         return r.data or []
 
+    # =========================
+    # BAN SYSTEM
+    # =========================
+
     def is_banned(self, user_id):
-            r = (
+        r = (
             self.db.table("banned_users")
             .select("user_id")
             .eq("user_id", int(user_id))
@@ -49,7 +54,7 @@ class Database:
         ).execute()
 
     def list_banned_users(self):
-            r = (
+        r = (
             self.db.table("banned_users")
             .select("user_id")
             .order("user_id")
@@ -57,16 +62,21 @@ class Database:
         )
         return r.data or []
 
+    # =========================
+    # ADMIN SYSTEM
+    # =========================
+
     def add_admin(self, user_id):
         user_id = int(user_id)
 
-        # admins references users, so ensure the target exists first.
+        # admins references users,
+        # so ensure the target exists first.
         self.add_user(user_id)
 
         self.db.table("admins").upsert({
             "user_id": user_id
         }).execute()
-        
+
     def delete_user(self, user_id):
         self.db.table("users").delete().eq(
             "user_id",
@@ -119,6 +129,10 @@ class Database:
             })
 
         return out
+
+    # =========================
+    # PREMIUM SYSTEM
+    # =========================
 
     def add_premium(self, user_id, days):
         user_id = int(user_id)
@@ -215,6 +229,10 @@ class Database:
     def is_premium(self, user_id):
         return self.get_premium(user_id) is not None
 
+    # =========================
+    # SETTINGS
+    # =========================
+
     def set_setting(self, key, value):
         self.db.table("settings").upsert({
             "key": key,
@@ -231,6 +249,10 @@ class Database:
         )
 
         return r.data[0]["value"] if r.data else default
+
+    # =========================
+    # FILE SYSTEM
+    # =========================
 
     def add_file(self, channel_id, message_id, caption=""):
         existing = (
@@ -285,6 +307,10 @@ class Database:
 
         return r.data or []
 
+    # =========================
+    # BATCH SYSTEM
+    # =========================
+
     def create_batch(self, file_ids):
         batch_id = uuid.uuid4().hex[:12]
 
@@ -326,6 +352,10 @@ class Database:
 
         return result
 
+    # =========================
+    # MAIN LINKS
+    # =========================
+
     def create_main_link(self, target):
         token = uuid.uuid4().hex
 
@@ -346,6 +376,10 @@ class Database:
         )
 
         return r.data[0] if r.data else None
+
+    # =========================
+    # TOKEN SYSTEM
+    # =========================
 
     def create_token(self, user_id, target, hours=2):
         token = uuid.uuid4().hex
@@ -416,6 +450,10 @@ class Database:
 
         return row["target"]
 
+    # =========================
+    # FORCE SUBSCRIPTION
+    # =========================
+
     def add_fsub(self, channel_id, invite_link="", title=""):
         self.db.table("fsub_channels").upsert({
             "channel_id": str(channel_id),
@@ -438,6 +476,10 @@ class Database:
         )
 
         return r.data or []
+
+    # =========================
+    # BROADCAST
+    # =========================
 
     def create_broadcast(self, message_id, delete_at=None):
         bid = uuid.uuid4().hex[:12]

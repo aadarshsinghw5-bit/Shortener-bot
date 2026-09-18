@@ -1,1186 +1,1013 @@
-import os
+import asyncio
+import hashlib
 import logging
+import os
 import re
-import threading
+import uuid
 from datetime import datetime, timezone, timedelta
-from zoneinfo import ZoneInfo
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import quote
+from typing import Optional
 
-from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, LinkPreviewOptions
-from telegram.constants import ChatMemberStatus
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    ContextTypes,
-    ApplicationHandlerStop,
-    filters,
+from aiogram import Bot, Dispatcher, F, Router
+from aiogram.exceptions import TelegramRetryAfter
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.filters import Command, CommandStart
+from aiogram.types import (
+    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
+    LinkPreviewOptions,
 )
+from fastapi import FastAPI
+import uvicorn
+from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import ReturnDocument
 
-from database import Database
-from shortener import Shortener
-
-load_dotenv()
-logging.basicConfig(format="%(asctime)s | %(levelname)s | %(name)s | %(message)s", level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(name)s - %(message)s")
 log = logging.getLogger("file-store-bot")
-for name in ("httpx", "httpcore", "telegram", "telegram.ext"):
-    logging.getLogger(name).setLevel(logging.WARNING)
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-BOT_USERNAME = os.environ["BOT_USERNAME"].lstrip("@")
+MONGO_URI = os.environ["MONGO_URI"]
 OWNER_ID = int(os.environ["OWNER_ID"])
-DB_CHANNEL_ID = int(os.environ["DB_CHANNEL_ID"])
-IST = ZoneInfo("Asia/Kolkata")
+PORT = int(os.getenv("PORT", "10000"))
+BOT_USERNAME = os.getenv("BOT_USERNAME", "").lstrip("@")
+MONGO_DB = os.getenv("MONGO_DB", "file_store_bot")
 
-db = Database()
-async def ban_guard(update, context):
-    user = update.effective_user
+INSTANCE_ID = hashlib.sha256(BOT_TOKEN.encode()).hexdigest()[:20]
+COMMON_SETTINGS_ID = "bot_settings"
+LOCAL_SETTINGS_ID = f"bot_settings_{INSTANCE_ID}"
 
-    # Channel posts aur bina user wale updates ignore
-    if not user:
-        return
+mongo = AsyncIOMotorClient(MONGO_URI)
+db = mongo[MONGO_DB]
 
-    # Owner ko ban guard se exempt rakho
-    if user.id == OWNER_ID:
-        return
+# =========================================================
+# DATABASE ISOLATION MODEL
+# =========================================================
+# SHARED across every clone (do NOT isolate these):
+#   admins, mods, channels, posts, batches
+#
+# CLONE-SPECIFIC: 
+#   users, broadcasts
+#
+# LOCAL SETTINGS (already clone-specific):
+#   start_image, fsub_channels
+#
+# Existing/old links stay compatible because batches/posts remain in
+# the original shared collection names.
+admins = db.admins
+mods = db.mods
+channels = db.channels
+posts = db.posts
+batches = db.batches
 
-    try:
-        banned = db.is_banned(user.id)
-    except Exception:
-        log.exception("Ban check failed")
-        return
+users = db[f"users_{INSTANCE_ID}"]
+broadcasts = db[f"broadcasts_{INSTANCE_ID}"]
 
-    if not banned:
-        return
+# Legacy users collection from versions where users were shared.
+# It is read only for migration/compatibility; new activity is stored
+# in the clone-specific users collection.
+legacy_users = db.users
 
-    # Banned user ko exact message
-    if update.message:
-        try:
-            await update.message.reply_text(
-                "🚫You Are Banned From Using The Bot 🚫"
-            )
-        except Exception:
-            pass
+settings = db.settings
 
-    # Baaki handlers ko message process karne se roko
-    raise ApplicationHandlerStop
-shortener = Shortener(db)
-_pending_image = set(); _pending_autodelete = set(); _pending_admin = set(); _pending_fsub = set()
+bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+dp = Dispatcher()
+router = Router()
+dp.include_router(router)
+app = FastAPI()
 
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(
-            b'{"ok":true,"service":"telegram-file-store-bot"}'
-        )
+# Performance tuning: keep user-facing operations responsive while staying
+# below Telegram/MongoDB pressure limits.
+BROADCAST_CONCURRENCY = max(1, min(int(os.getenv("BROADCAST_CONCURRENCY", "8")), 20))
+SETTING_CACHE_TTL = float(os.getenv("SETTING_CACHE_TTL", "15"))
+_setting_cache = {}
+_setting_cache_expiry = {}
 
-    def do_HEAD(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", "49")
-        self.end_headers()
+@app.api_route("/", methods=["GET", "HEAD"])
+async def health():
+    return {"ok": True, "service": "telegram-file-store-bot"}
 
-    def log_message(self, format, *args):
-        pass
-def start_health_server():
-    port = int(os.environ.get("PORT", "10000")); server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    log.info("Health server running on port %s", port); server.serve_forever()
-
-def start_image(): return db.get_setting("start_image", "")
-
-def start_caption():
-    return ("<i>ʜɪ ᴛʜᴇʀᴇ....! 💥</i>\n\n"
-            "ɪ ᴀᴍ ᴀ ꜰɪʟᴇ-ꜱᴛᴏʀᴇ ʙᴏᴛ.\n"
-            "ɪ ᴄᴀɴ ɢᴇɴᴇʀᴀᴛᴇ ʟɪɴᴋꜱ ᴅɪʀᴇᴄᴛʟʏ ᴡɪᴛʜ ɴᴏ ᴘʀᴏʙʟᴇᴍꜱ.\n\n"
-            "<b>ᴍʏ ᴏᴡɴᴇʀ:</b> <a href=\"https://t.me/Its_Lozo\">@ɪᴛꜱ_ʟᴏᴢᴏ</a>")
-
-def about_caption():
-    return ("<b>ᴀʙᴏᴜᴛ ᴜꜱ..</b>\n\n"
-            "➤ ᴍᴀᴅᴇ ꜰᴏʀ : <a href=\"https://t.me/Anime_Hub_94\">ᴀɴɪᴍᴇ ʜᴜʙ</a>\n"
-            "➤ ᴏᴡɴᴇʀ : <a href=\"https://t.me/Its_Lozo\">@ɪᴛꜱ_ʟᴏᴢᴏ</a>\n"
-            "➤ ᴅᴇᴠᴇʟᴏᴘᴇʀ : <a href=\"https://t.me/Its_Lozo\">@ɪᴛꜱ_ʟᴏᴢᴏ</a>\n\nᴀᴅɪᴏꜱ !!")
-
-def start_keyboard(): return InlineKeyboardMarkup([[InlineKeyboardButton("ᴀʙᴏᴜᴛ", callback_data="about"), InlineKeyboardButton("ᴄʟᴏꜱᴇ", callback_data="close")]])
-def about_keyboard(): return InlineKeyboardMarkup([[InlineKeyboardButton("ʙᴀᴄᴋ", callback_data="back"), InlineKeyboardButton("ᴄʟᴏꜱᴇ", callback_data="close")]])
-
-async def render_start(message):
-    image = start_image()
-    if image:
-        try: return await message.reply_photo(photo=image, caption=start_caption(), parse_mode="HTML", reply_markup=start_keyboard())
-        except Exception: log.exception("Could not send start image")
-    await message.reply_text(start_caption(), parse_mode="HTML", reply_markup=start_keyboard())
-
-async def edit_start(q):
-    image = start_image()
-    if image:
-        try: return await q.edit_message_media(media=InputMediaPhoto(media=image, caption=start_caption(), parse_mode="HTML"), reply_markup=start_keyboard())
-        except Exception: pass
-    try: await q.edit_message_text(start_caption(), parse_mode="HTML", reply_markup=start_keyboard())
-    except Exception: pass
-
-async def edit_about(q):
-    try: await q.edit_message_caption(caption=about_caption(), parse_mode="HTML", reply_markup=about_keyboard())
-    except Exception: await q.edit_message_text(about_caption(), parse_mode="HTML", reply_markup=about_keyboard())
-
-async def is_fsub_member(bot, user_id):
-    missing=[]
-    for row in db.list_fsub():
-        try:
-            m=await bot.get_chat_member(int(row["channel_id"]), user_id)
-            if m.status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED): missing.append(row)
-        except Exception: missing.append(row)
-    return missing
-
-def fsub_keyboard(rows):
-    buttons=[]
-    for row in rows:
-        if row.get("invite_link"): buttons.append([InlineKeyboardButton(f"ᴊᴏɪɴ {row.get('title') or 'ᴄʜᴀɴɴᴇʟ'}", url=row["invite_link"])])
-    buttons.append([InlineKeyboardButton("✅ ᴄʜᴇᴄᴋ ᴊᴏɪɴ", callback_data="check_fsub")]); return InlineKeyboardMarkup(buttons)
-
-def main_link_url(token): return f"https://t.me/{BOT_USERNAME}?start=link_{token}"
-def share_url(url): return f"https://t.me/share/url?url={quote(url, safe='')}"
-def admin_ok(uid): return uid == OWNER_ID or db.is_admin(uid)
-
-def settings_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🖼️ ꜱᴇᴛ ɪᴍᴀɢᴇ", callback_data="set_image"), InlineKeyboardButton("🗑️ ᴀᴜᴛᴏ ᴅᴇʟᴇᴛᴇ", callback_data="auto_delete")],
-        [InlineKeyboardButton("👮 ᴀᴅᴍɪɴꜱ", callback_data="admins"), InlineKeyboardButton("📢 ꜰꜱᴜʙ", callback_data="fsub")],
-        [InlineKeyboardButton("✖️ ᴄʟᴏꜱᴇ", callback_data="settings_close")]])
-
-def settings_text():
-    return "<b>⚙️ ꜱᴇᴛᴛɪɴɢꜱ</b>\n\nᴄʜᴏᴏꜱᴇ ᴀɴ ᴏᴘᴛɪᴏɴ."
+@app.api_route("/health", methods=["GET", "HEAD"])
+async def health2():
+    return {"ok": True}
 
 
-async def settings(update, context):
-    uid = update.effective_user.id
+def now():
+    return datetime.now(timezone.utc)
 
-    if not admin_ok(uid):
-        return await update.message.reply_text(
-            "❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ"
-        )
 
-    return await update.message.reply_text(
-        settings_text(),
-        parse_mode="HTML",
-        reply_markup=settings_keyboard()
+def is_owner(user_id: int) -> bool:
+    return user_id == OWNER_ID
+
+async def is_admin(user_id: int) -> bool:
+    return is_owner(user_id) or await admins.find_one({"user_id": user_id}) is not None
+
+async def is_mod(user_id: int) -> bool:
+    return await is_admin(user_id) or await mods.find_one({"user_id": user_id}) is not None
+
+async def ensure_user(message: Message):
+    """Fast user upsert: one Mongo round-trip and no legacy lookup per /start."""
+    if not message.from_user:
+        return None
+    u = message.from_user
+    return await users.find_one_and_update(
+        {"user_id": u.id},
+        {"$set": {
+            "user_id": u.id,
+            "username": u.username,
+            "first_name": u.first_name,
+            "last_name": u.last_name,
+            "last_seen": now(),
+        }},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
     )
 
-async def genlink(update, context):
-    if not admin_ok(update.effective_user.id): return await update.message.reply_text("❌ ʏᴏᴜ ᴀʀᴇ ɴᴏᴛ ᴀᴜᴛʜᴏʀɪᴢᴇᴅ.")
-    replied=update.message.reply_to_message
-    if not replied: return await update.message.reply_text("ʀᴇᴘʟʏ ᴛᴏ ᴀɴʏ ᴍᴇꜱꜱᴀɢᴇ ᴀɴᴅ ᴜꜱᴇ /ɢᴇɴʟɪɴᴋ.")
-    try:
-        # Save ANY replied message (text/media/forward/etc.) into DB channel without forward header.
-        copied=await context.bot.copy_message(chat_id=DB_CHANNEL_ID, from_chat_id=replied.chat_id, message_id=replied.message_id)
-        file_id=db.add_file(DB_CHANNEL_ID, copied.message_id, getattr(replied, "caption", None) or getattr(replied, "text", None) or "")
-        main=db.create_main_link(f"message:{DB_CHANNEL_ID}:{copied.message_id}"); url=main_link_url(main)
-        markup=InlineKeyboardMarkup([[InlineKeyboardButton("↗ ꜱʜᴀʀᴇ ᴜʀʟ", url=share_url(url))]])
-        # Put the share button under the DB copy.
-        try: await context.bot.edit_message_reply_markup(DB_CHANNEL_ID, copied.message_id, reply_markup=markup)
-        except Exception: pass
-        await update.message.reply_text(f"✅ <b>ɢᴇɴʟɪɴᴋ ɢᴇɴᴇʀᴀᴛᴇᴅ</b>\n\n{url}", parse_mode="HTML", disable_web_page_preview=True, reply_markup=markup)
-    except Exception:
-        log.exception("Genlink failed"); await update.message.reply_text("❌ ɢᴇɴʟɪɴᴋ ɢᴇɴᴇʀᴀᴛᴇ ɴᴀʜɪ ʜᴜᴀ.")
 
-def parse_message_link(link):
-    m=re.fullmatch(r"https?://t\.me/c/(\d+)/(\d+)",link.strip())
-    if m:return int("-100"+m.group(1)),int(m.group(2))
-    m=re.fullmatch(r"https?://t\.me/([^/]+)/(\d+)",link.strip())
-    if m:return m.group(1),int(m.group(2))
+async def migrate_legacy_users_once():
+    """Copy the old shared audience into this clone only when this clone has
+    no users yet. Future users remain completely clone-specific."""
+    try:
+        if await users.count_documents({}) > 0:
+            return
+        legacy_docs = await legacy_users.find({}, {"_id": 0}).to_list(length=None)
+        if not legacy_docs:
+            return
+        operations = []
+        for doc in legacy_docs:
+            uid = doc.get("user_id")
+            if uid:
+                operations.append({"update_one": {
+                    "filter": {"user_id": uid},
+                    "update": {"$setOnInsert": doc},
+                    "upsert": True,
+                }})
+        if operations:
+            # Motor/PyMongo accept a list of WriteModel objects, so build the
+            # operations using UpdateOne below for compatibility.
+            from pymongo import UpdateOne
+            await users.bulk_write([
+                UpdateOne(x["update_one"]["filter"], x["update_one"]["update"], upsert=True)
+                for x in operations
+            ], ordered=False)
+            log.info("Migrated %s legacy users into clone users collection.", len(operations))
+    except Exception as e:
+        log.warning("Legacy user migration failed: %s", e)
+
+
+LOCAL_SETTINGS = {"start_image", "fsub_channels"}
+
+async def get_setting(key, default=None):
+    document_id = LOCAL_SETTINGS_ID if key in LOCAL_SETTINGS else COMMON_SETTINGS_ID
+    cached = _setting_cache.get((document_id, key))
+    if cached is not None and _setting_cache_expiry.get((document_id, key), 0) > asyncio.get_running_loop().time():
+        return cached
+    data = await settings.find_one({"_id": document_id}, {key: 1})
+    value = default if not data else data.get(key, default)
+    _setting_cache[(document_id, key)] = value
+    _setting_cache_expiry[(document_id, key)] = asyncio.get_running_loop().time() + SETTING_CACHE_TTL
+    return value
+
+async def set_setting(key, value):
+    document_id = LOCAL_SETTINGS_ID if key in LOCAL_SETTINGS else COMMON_SETTINGS_ID
+    await settings.update_one({"_id": document_id}, {"$set": {key: value}}, upsert=True)
+    _setting_cache[(document_id, key)] = value
+    _setting_cache_expiry[(document_id, key)] = asyncio.get_running_loop().time() + SETTING_CACHE_TTL
+
+
+async def get_bot_username():
+    global BOT_USERNAME
+    if BOT_USERNAME:
+        return BOT_USERNAME
+    me = await bot.get_me()
+    BOT_USERNAME = me.username
+    return BOT_USERNAME
+
+
+def profile_link(user_id: int, name: str):
+    return f'<a href="tg://user?id={user_id}">{name or "User"}</a>'
+
+async def get_user_name(user_id: int):
+    data = await users.find_one({"user_id": user_id})
+    if data:
+        name = data.get("first_name") or data.get("username")
+        if name:
+            return name
+    try:
+        chat = await bot.get_chat(user_id)
+        if chat.first_name:
+            return chat.first_name
+        if chat.username:
+            return chat.username
+    except Exception:
+        pass
+    return f"User {user_id}"
+
+
+def parse_link(link: str):
+    link = link.strip()
+    m = re.match(r"https?://t\.me/c/(\d+)/(\d+)", link)
+    if m:
+        return int("-100" + m.group(1)), int(m.group(2))
+    m = re.match(r"https?://t\.me/([A-Za-z0-9_]+)/(\d+)", link)
+    if m:
+        return "@" + m.group(1), int(m.group(2))
     return None
 
-async def batch(update, context):
-    if not admin_ok(update.effective_user.id): return await update.message.reply_text("❌ ʏᴏᴜ ᴀʀᴇ ɴᴏᴛ ᴀᴜᴛʜᴏʀɪᴢᴇᴅ.")
-    if len(context.args)!=2:return await update.message.reply_text("ᴜꜱᴀɢᴇ:\n/ʙᴀᴛᴄʜ <ꜰɪʀꜱᴛ ᴅʙ ʟɪɴᴋ> <ʟᴀꜱᴛ ᴅʙ ʟɪɴᴋ>")
-    first,last=parse_message_link(context.args[0]),parse_message_link(context.args[1])
-    if not first or not last:return await update.message.reply_text("❌ ɪɴᴠᴀʟɪᴅ ᴛᴇʟᴇɢʀᴀᴍ ᴘᴏꜱᴛ ʟɪɴᴋ.")
+
+def media_kind(message: Message) -> Optional[str]:
+    if message.photo: return "photo"
+    if message.video: return "video"
+    if message.document: return "document"
+    if message.audio: return "audio"
+    if message.voice: return "voice"
+    if message.animation: return "animation"
+    if message.sticker: return "sticker"
+    if message.text: return "text"
+    return None
+
+
+def get_file_unique_id(message: Message) -> Optional[str]:
+    if message.photo: return message.photo[-1].file_unique_id
+    if message.video: return message.video.file_unique_id
+    if message.document: return message.document.file_unique_id
+    if message.audio: return message.audio.file_unique_id
+    if message.voice: return message.voice.file_unique_id
+    if message.animation: return message.animation.file_unique_id
+    if message.sticker: return message.sticker.file_unique_id
+    return None
+
+
+def link_preview_disabled():
+    return LinkPreviewOptions(is_disabled=True)
+
+async def delete_message_later(chat_id: int, message_id: int, seconds: int):
     try:
-        fc=(await context.bot.get_chat(first[0])).id if isinstance(first[0],str) else first[0]; lc=(await context.bot.get_chat(last[0])).id if isinstance(last[0],str) else last[0]
-    except Exception:return await update.message.reply_text("❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ʀᴇꜱᴏʟᴠᴇ ᴛʜᴇ ᴅʙ ᴄʜᴀɴɴᴇʟ.")
-    if fc!=DB_CHANNEL_ID or lc!=DB_CHANNEL_ID:return await update.message.reply_text("❌ ʙᴏᴛʜ ʟɪɴᴋꜱ ᴍᴜꜱᴛ ʙᴇ ꜰʀᴏᴍ ᴛʜᴇ ᴅʙ ᴄʜᴀɴɴᴇʟ.")
-    lo,hi=sorted((first[1],last[1])); rows=db.list_files_between(DB_CHANNEL_ID,lo,hi)
-    if not rows:return await update.message.reply_text("❌ ɴᴏ ᴅʙ ᴘᴏꜱᴛꜱ ꜰᴏᴜɴᴅ ɪɴ ᴛʜɪꜱ ʀᴀɴɢᴇ.")
-    bid=db.create_batch([r["file_id"] for r in rows]); main=db.create_main_link(f"batch:{bid}"); url=main_link_url(main)
-    markup=InlineKeyboardMarkup([[InlineKeyboardButton("↗ ꜱʜᴀʀᴇ ᴜʀʟ",url=share_url(url))]])
-    await context.bot.send_message(DB_CHANNEL_ID,"📦 <b>ʙᴀᴛᴄʜ ꜱʜᴀʀᴇ ᴜʀʟ</b>",parse_mode="HTML",reply_markup=markup)
-    await update.message.reply_text(f"✅ <b>ʙᴀᴛᴄʜ ʟɪɴᴋ ɢᴇɴᴇʀᴀᴛᴇᴅ</b>\n\nɪᴛᴇᴍꜱ: <b>{len(rows)}</b>\n\n{url}",parse_mode="HTML",disable_web_page_preview=True,reply_markup=markup)
-
-async def send_download_page(message,short_url):
-    caption=("<i>📊 ʜᴇʏ ʙʀᴏ/ꜱɪꜱ,</i>\n\n➜ ʏᴏᴜʀ ʟɪɴᴋ ɪꜱ ʀᴇᴀᴅʏ, ᴋɪɴᴅʟʏ ᴄʟɪᴄᴋ ᴏɴ\nᴅᴏᴡɴʟᴏᴀᴅ ʙᴜᴛᴛᴏɴ! 👇\n\nᴛᴏ ʙᴜʏ ᴘʀᴇᴍɪᴜᴍ, ᴄᴏɴᴛᴀᴄᴛ: <a href=\"https://t.me/Its_Lozo\">@ɪᴛꜱ_ʟᴏᴢᴏ</a>")
-    kb=InlineKeyboardMarkup([[InlineKeyboardButton("• ᴄʟɪᴄᴋ ʜᴇʀᴇ ᴛᴏ ᴅᴏᴡɴʟᴏᴀᴅ •",url=short_url)],[InlineKeyboardButton("ᴘʀᴇᴍɪᴜᴍ",url="https://t.me/PremiumHub094"),InlineKeyboardButton("ᴛᴜᴛᴏʀɪᴀʟ",url="https://t.me/Tutorial_Hub_94/4")]])
-    image=start_image()
-    if image:
-        try:return await message.reply_photo(photo=image,caption=caption,parse_mode="HTML",reply_markup=kb)
-        except Exception:pass
-    await message.reply_text(caption,parse_mode="HTML",reply_markup=kb)
-
-async def deliver_target(update,target):
-    ids=[]; bot=update.get_bot(); chat_id=update.effective_chat.id
-    if target.startswith("message:"):
-        _,cid,mid=target.split(":",2); m=await bot.copy_message(chat_id=chat_id,from_chat_id=int(cid),message_id=int(mid)); ids.append(m.message_id)
-    elif target.startswith("batch:"):
-        bid=target.split(":",1)[1]; rows=db.get_batch_items(bid)
-        if not rows:return []
-        for row in rows:
-            try:
-                m=await bot.copy_message(chat_id=chat_id,from_chat_id=int(row["channel_id"]),message_id=int(row["message_id"])); ids.append(m.message_id)
-            except Exception: log.exception("Batch delivery failed")
-    return ids
-
-async def delete_delivered(context):
-    data=context.job.data
-    for mid in data["message_ids"]:
-        try: await context.bot.delete_message(data["chat_id"],mid)
-        except Exception: pass
-
-def auto_delete_minutes():
-    try:return max(0,int(db.get_setting("auto_delete_minutes","10")))
-    except:return 10
-
-async def deliver_and_notify(update, context, target):
-    ids = await deliver_target(update, target)
-
-    if not ids:
-        return
-
-    mins = auto_delete_minutes()
-
-    if mins > 0:
-        msg = await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=(
-    f"ᴛʜɪꜱ ꜰɪʟᴇ ɪꜱ ᴅᴇʟᴇᴛɪɴɢ ᴀᴜᴛᴏᴍᴀᴛɪᴄᴀʟʟʏ ɪɴ {mins} ᴍɪɴᴜᴛᴇꜱ.\n\n"
-    f"ꜰᴏʀᴡᴀʀᴅ ɪᴛ ᴛᴏ ʏᴏᴜʀ ꜱᴀᴠᴇᴅ ᴍᴇꜱꜱᴀɢᴇꜱ..!"
-            )
-        )
-
-        ids.append(msg.message_id)
-
-        context.job_queue.run_once(
-            delete_delivered,
-            mins * 60,
-            data={
-                "chat_id": update.effective_chat.id,
-                "message_ids": ids
-            }
-        )
-
-async def verify(update,context,token):
-    uid=update.effective_user.id
-    if uid==OWNER_ID:
-        row=db.get_token(token)
-        if row:
-            target=db.consume_token(token,uid) if int(row["user_id"])==uid else row["target"]
-            if target:return await deliver_and_notify(update,context,target)
-        return await update.message.reply_text("❌ ᴛʜɪꜱ ʟɪɴᴋ ɪꜱ ɴᴏᴛ ᴠᴀʟɪᴅ.")
-    missing=await is_fsub_member(context.bot,uid)
-    if missing:return await update.message.reply_text("⚡ <b>ᴊᴏɪɴ ʀᴇǫᴜɪʀᴇᴅ</b>\n\nᴊᴏɪɴ ᴀʟʟ ʀᴇǫᴜɪʀᴇᴅ ᴄʜᴀɴɴᴇʟꜱ ᴛʜᴇɴ ᴛᴀᴘ ᴄʜᴇᴄᴋ ᴊᴏɪɴ.",parse_mode="HTML",reply_markup=fsub_keyboard(missing))
-    row=db.get_token(token)
-    if not row or int(row["user_id"])!=uid:return await update.message.reply_text("❌ ᴛʜɪꜱ ꜱʜᴏʀᴛᴇɴᴇʀ ʟɪɴᴋ ɪꜱ ɴᴏᴛ ᴍᴀᴅᴇ ꜰᴏʀ ʏᴏᴜ.")
-    target=db.consume_token(token,uid)
-    if not target:return await update.message.reply_text("❌ ᴛʜɪꜱ ꜱʜᴏʀᴛᴇɴᴇʀ ʟɪɴᴋ ɪꜱ ᴇxᴘɪʀᴇᴅ ᴏʀ ᴀʟʀᴇᴀᴅʏ ᴜꜱᴇᴅ.")
-    await deliver_and_notify(update,context,target)
-
-async def open_main(update,context,token):
-    uid=update.effective_user.id; row=db.get_main_link(token)
-    if not row:return await update.message.reply_text("❌ ᴛʜɪꜱ ʟɪɴᴋ ɪꜱ ɴᴏᴛ ᴠᴀʟɪᴅ.")
-    missing=await is_fsub_member(context.bot,uid)
-    if missing:return await update.message.reply_text("⚡ <b>ᴊᴏɪɴ ʀᴇǫᴜɪʀᴇᴅ</b>\n\nᴊᴏɪɴ ᴀʟʟ ʀᴇǫᴜɪʀᴇᴅ ᴄʜᴀɴɴᴇʟꜱ ᴛʜᴇɴ ᴛᴀᴘ ᴄʜᴇᴄᴋ ᴊᴏɪɴ.",parse_mode="HTML",reply_markup=fsub_keyboard(missing))
-    if uid==OWNER_ID or db.is_premium(uid): return await deliver_and_notify(update,context,row["target"])
-    tok=db.create_token(uid,row["target"],2); short_url=shortener.create_from_token(tok,BOT_USERNAME)
-    if not short_url:return await update.message.reply_text("⚠️ ꜱʜᴏʀᴛᴇɴᴇʀ ɪꜱ ɴᴏᴛ ᴄᴏɴꜰɪɢᴜʀᴇᴅ ᴄᴏʀʀᴇᴄᴛʟʏ.")
-    await send_download_page(update.message,short_url)
-
-async def start(update,context):
-    u=update.effective_user; db.add_user(u.id,u.username or "",u.first_name or "")
-    if db.is_banned(u.id):return await update.message.reply_text("🚫 ʏᴏᴜ ᴀʀᴇ ʙᴀɴɴᴇᴅ.")
-    if context.args:
-        a=context.args[0]
-        if a.startswith("verify_"):return await verify(update,context,a[7:])
-        if a.startswith("link_"):return await open_main(update,context,a[5:])
-    await render_start(update.message)
-
-async def callback(update, context):
-    q = update.callback_query
-    uid = q.from_user.id
-
-    if not admin_ok(uid):
-        return await q.answer(
-            "❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ",
-            show_alert=True
-        )
-
-    if q.data in ("add_admin", "remove_admin") and uid != OWNER_ID:
-        return await q.answer(
-            "🚫 ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ᴀᴅᴅ/ʀᴇᴍᴏᴠᴇ ᴀᴅᴍɪɴꜱ",
-            show_alert=True
-        )
-
-    if q.data in ("add_fsub", "remove_fsub") and uid != OWNER_ID:
-        return await q.answer(
-            "🚫 ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ᴀᴅᴅ/ʀᴇᴍᴏᴠᴇ ꜰꜱᴜʙ",
-            show_alert=True
-        )
-
-    await q.answer()
-
-    # =========================
-    # CLOSE
-    # =========================
-    if q.data in ("close", "settings_close"):
-        try:
-            await q.message.delete()
-        except:
-            pass
-        return
-
-    # =========================
-    # ABOUT
-    # =========================
-    if q.data == "about":
-        return await edit_about(q)
-
-    # =========================
-    # BACK
-    # =========================
-    if q.data == "back":
-        return await edit_start(q)
-
-    # =========================
-    # F-SUB CHECK
-    # =========================
-    if q.data == "check_fsub":
-        missing = await is_fsub_member(context.bot, uid)
-
-        if missing:
-            return await q.answer(
-                "❌ ᴊᴏɪɴ ᴀʟʟ ᴄʜᴀɴɴᴇʟꜱ ꜰɪʀꜱᴛ.",
-                show_alert=True
-            )
-
-        try:
-            await q.message.delete()
-        except:
-            pass
-
-        return await render_start(q.message)
-
-    # =========================
-    # ADMIN CHECK
-    # =========================
-    if not admin_ok(uid):
-        return await q.answer(
-            "❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ",
-            show_alert=True
-        )
-
-    # =========================
-    # SET START IMAGE
-    # ADMIN + OWNER
-    # =========================
-    if q.data == "set_image":
-        _pending_image.add(uid)
-
-        return await q.message.reply_text(
-            "🖼️ ʟᴇᴛ ᴍᴇ ʜᴀᴠᴇ ᴛʜᴇ ɪᴍᴀɢᴇ ʏᴏᴜ ᴡᴀɴᴛ ᴛᴏ ᴜꜱᴇ ᴀꜱ ꜱᴛᴀʀᴛ ɪᴍᴀɢᴇ."
-        )
-
-    # =========================
-    # AUTO DELETE
-    # ADMIN + OWNER
-    # =========================
-    if q.data == "auto_delete":
-        cur = auto_delete_minutes()
-
-        _pending_autodelete.add(uid)
-
-        return await q.message.reply_text(
-            f"🗑️ ᴀᴜᴛᴏ ᴅᴇʟᴇᴛᴇ ᴛɪᴍᴇ: "
-            f"<b>{cur} ᴍɪɴᴜᴛᴇꜱ</b>\n\n"
-            f"ꜱᴇɴᴅ ᴛʜᴇ ɴᴇᴡ ᴛɪᴍᴇ ɪɴ ᴍɪɴᴜᴛᴇꜱ.\n"
-            f"ꜱᴇɴᴅ <code>0</code> ᴛᴏ ᴅɪꜱᴀʙʟᴇ.",
-            parse_mode="HTML"
-        )
-
-    # =========================
-    # ADMINS LIST
-    # ADMIN + OWNER
-    # =========================
-    if q.data == "admins":
-
-        lines = [
-            "<b>👮 ᴀᴅᴍɪɴꜱ</b>",
-            "",
-            f'• <a href="tg://user?id={OWNER_ID}">'
-            f"ᴏᴡɴᴇʀ</a> — <code>{OWNER_ID}</code>"
-        ]
-
-        for a in db.list_admins():
-            name = (
-                a["first_name"]
-                or ("@" + a["username"] if a["username"] else "ᴀᴅᴍɪɴ")
-            )
-
-            lines.append(
-                f'• <a href="tg://user?id={a["user_id"]}">'
-                f"{name}</a> — <code>{a['user_id']}</code>"
-            )
-
-        return await q.message.edit_text(
-            "\n".join(lines),
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "➕ ᴀᴅᴅ ᴀᴅᴍɪɴ",
-                        callback_data="add_admin"
-                    ),
-                    InlineKeyboardButton(
-                        "➖ ʀᴇᴍᴏᴠᴇ",
-                        callback_data="remove_admin"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "↩️ ʙᴀᴄᴋ",
-                        callback_data="settings_back"
-                    )
-                ]
-            ])
-        )
-
-    # =========================
-    # ADD ADMIN
-    # OWNER ONLY
-    # =========================
-    if q.data == "add_admin":
-
-        if uid != OWNER_ID:
-            return await q.answer(
-                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ᴀᴅᴅ ᴀᴅᴍɪɴꜱ.",
-                show_alert=True
-            )
-
-        _pending_admin.add(uid)
-
-        return await q.message.reply_text(
-            "➕ ꜱᴇɴᴅ ᴛʜᴇ ᴜꜱᴇʀ ɪᴅ ᴛᴏ ᴀᴅᴅ ᴀꜱ ᴀᴅᴍɪɴ."
-        )
-
-    # =========================
-    # REMOVE ADMIN
-    # OWNER ONLY
-    # =========================
-    if q.data == "remove_admin":
-
-        if uid != OWNER_ID:
-            return await q.answer(
-                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ʀᴇᴍᴏᴠᴇ ᴀᴅᴍɪɴꜱ.",
-                show_alert=True
-            )
-
-        _pending_admin.add(-uid)
-
-        return await q.message.reply_text(
-            "➖ ꜱᴇɴᴅ ᴛʜᴇ ᴜꜱᴇʀ ɪᴅ ᴛᴏ ʀᴇᴍᴏᴠᴇ ᴀɴ ᴀᴅᴍɪɴ."
-        )
-
-    # =========================
-    # F-SUB LIST
-    # ADMIN + OWNER
-    # =========================
-    if q.data == "fsub":
-
-        rows = db.list_fsub()
-
-        lines = [
-            "<b>📢 ꜰꜱᴜʙ ᴄʜᴀɴɴᴇʟꜱ</b>",
-            ""
-        ]
-
-        for r in rows:
-            lines.append(
-                f'• <a href="{r.get("invite_link", "")}">'
-                f'{r.get("title", "ᴄʜᴀɴɴᴇʟ")}</a> — '
-                f'<code>{r["channel_id"]}</code>'
-            )
-
-        kb = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "➕ ᴀᴅᴅ ꜰꜱᴜʙ",
-                    callback_data="add_fsub"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "➖ ʀᴇᴍᴏᴠᴇ ꜰꜱᴜʙ",
-                    callback_data="remove_fsub"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "↩️ ʙᴀᴄᴋ",
-                    callback_data="settings_back"
-                )
-            ]
-        ])
-
-        return await q.message.edit_text(
-            "\n".join(lines),
-            parse_mode="HTML",
-            reply_markup=kb
-        )
-
-    # =========================
-    # ADD F-SUB
-    # OWNER ONLY
-    # =========================
-    if q.data == "add_fsub":
-
-        if uid != OWNER_ID:
-            return await q.answer(
-                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ᴀᴅᴅ ꜰꜱᴜʙ.",
-                show_alert=True
-            )
-
-        _pending_fsub.add(uid)
-
-        return await q.message.reply_text(
-            "📢 ꜱᴇɴᴅ ᴛʜᴇ ᴄʜᴀɴɴᴇʟ ɪᴅ ᴏɴʟʏ.\n"
-            "ᴛʜᴇ ʙᴏᴛ ᴡɪʟʟ ɢᴇᴛ ᴛʜᴇ ᴄʜᴀɴɴᴇʟ ɴᴀᴍᴇ ᴀɴᴅ "
-            "ɪɴᴠɪᴛᴇ ʟɪɴᴋ ᴀᴜᴛᴏᴍᴀᴛɪᴄᴀʟʟʏ."
-        )
-
-    # =========================
-    # REMOVE F-SUB
-    # OWNER ONLY
-    # =========================
-    if q.data == "remove_fsub":
-
-        if uid != OWNER_ID:
-            return await q.answer(
-                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ʀᴇᴍᴏᴠᴇ ꜰꜱᴜʙ.",
-                show_alert=True
-            )
-
-        _pending_fsub.add(
-            uid * 1000000000 + 1
-        )
-
-        return await q.message.reply_text(
-            "➖ ꜱᴇɴᴅ ᴛʜᴇ ꜰꜱᴜʙ ᴄʜᴀɴɴᴇʟ ɪᴅ ᴛᴏ ʀᴇᴍᴏᴠᴇ."
-        )
-
-    # =========================
-    # SETTINGS BACK
-    # =========================
-    if q.data == "settings_back":
-        return await q.message.edit_text(
-            settings_text(),
-            parse_mode="HTML",
-            reply_markup=settings_keyboard()
-        )
-
-async def settings_input(update, context):
-    uid = update.effective_user.id
-
-    if not admin_ok(uid):
-        return
-
-    # 🖼️ Start Image — Admin + Owner
-    if uid in _pending_image and update.message.photo:
-        db.set_setting(
-            "start_image",
-            update.message.photo[-1].file_id
-        )
-        _pending_image.discard(uid)
-
-        return await update.message.reply_text(
-            "✅ ꜱᴛᴀʀᴛ ɪᴍᴀɢᴇ ᴜᴘᴅᴀᴛᴇᴅ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ."
-        )
-
-    # 🗑️ Auto Delete — Admin + Owner
-    if uid in _pending_autodelete:
-        try:
-            minutes = max(0, int(update.message.text.strip()))
-
-            db.set_setting(
-                "auto_delete_minutes",
-                minutes
-            )
-
-            _pending_autodelete.discard(uid)
-
-            return await update.message.reply_text(
-                f"✅ ᴀᴜᴛᴏ ᴅᴇʟᴇᴛᴇ ꜱᴇᴛ ᴛᴏ {minutes} ᴍɪɴᴜᴛᴇꜱ."
-            )
-
-        except Exception:
-            return await update.message.reply_text(
-                "❌ ꜱᴇɴᴅ ᴀ ᴠᴀʟɪᴅ ɴᴜᴍʙᴇʀ."
-            )
-
-    # 👮 Add / Remove Admin — OWNER ONLY
-    if uid in _pending_admin or -uid in _pending_admin:
-
-        if uid != OWNER_ID:
-            _pending_admin.discard(uid)
-            _pending_admin.discard(-uid)
-
-            return await update.message.reply_text(
-                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ᴀᴅᴅ ᴏʀ ʀᴇᴍᴏᴠᴇ ᴀᴅᴍɪɴꜱ."
-            )
-
-        try:
-            target_uid = int(update.message.text.strip())
-        except Exception:
-            return await update.message.reply_text(
-                "❌ ᴇɴᴛᴇʀ ᴀ ᴠᴀʟɪᴅ ᴜꜱᴇʀ ɪᴅ."
-            )
-
-        remove_mode = -uid in _pending_admin
-
-        _pending_admin.discard(uid)
-        _pending_admin.discard(-uid)
-
-        if remove_mode:
-            db.remove_admin(target_uid)
-
-            return await update.message.reply_text(
-                "✅ ᴀᴅᴍɪɴ ʀᴇᴍᴏᴠᴇᴅ."
-            )
-
-        db.add_admin(target_uid)
-
-        return await update.message.reply_text(
-            "✅ ᴀᴅᴍɪɴ ᴀᴅᴅᴇᴅ."
-        )
-
-    # 📢 Add FSub — OWNER ONLY
-    if uid in _pending_fsub:
-
-        if uid != OWNER_ID:
-            _pending_fsub.discard(uid)
-
-            return await update.message.reply_text(
-                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ᴀᴅᴅ ꜰꜱᴜʙ."
-            )
-
-        try:
-            cid = int(update.message.text.strip())
-
-            chat = await context.bot.get_chat(cid)
-
-            invite = await context.bot.create_chat_invite_link(
-                cid,
-                name="File Store FSub"
-            )
-
-            db.add_fsub(
-                cid,
-                invite.invite_link,
-                chat.title or chat.username or str(cid)
-            )
-
-            _pending_fsub.discard(uid)
-
-            return await update.message.reply_text(
-                f"✅ <b>ꜰꜱᴜʙ ᴀᴅᴅᴇᴅ</b>\n\n"
-                f"📢 <a href=\"{invite.invite_link}\">"
-                f"{chat.title or 'Channel'}</a>\n"
-                f"🆔 <code>{cid}</code>\n"
-                f"🔗 <a href=\"{invite.invite_link}\">ɪɴᴠɪᴛᴇ ʟɪɴᴋ</a>",
-                parse_mode="HTML"
-            )
-
-        except Exception as e:
-            return await update.message.reply_text(
-                "❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ᴀᴅᴅ ᴛʜɪꜱ ᴄʜᴀɴɴᴇʟ.\n"
-                "ᴍᴀᴋᴇ ꜱᴜʀᴇ ᴛʜᴇ ʙᴏᴛ ɪꜱ ᴀᴅᴍɪɴ.\n\n"
-                f"<code>{e}</code>",
-                parse_mode="HTML"
-            )
-
-    # 📢 Remove FSub — OWNER ONLY
-    remkey = uid * 1000000000 + 1
-
-    if remkey in _pending_fsub:
-
-        if uid != OWNER_ID:
-            _pending_fsub.discard(remkey)
-
-            return await update.message.reply_text(
-                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ʀᴇᴍᴏᴠᴇ ꜰꜱᴜʙ."
-            )
-
-        try:
-            cid = update.message.text.strip()
-
-            db.del_fsub(cid)
-
-            _pending_fsub.discard(remkey)
-
-            return await update.message.reply_text(
-                "✅ ꜰꜱᴜʙ ᴄʜᴀɴɴᴇʟ ʀᴇᴍᴏᴠᴇᴅ."
-            )
-
-        except Exception:
-            return await update.message.reply_text(
-                "❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ʀᴇᴍᴏᴠᴇ."
-            )
-
-async def addsubs(update,context):
-    if not admin_ok(update.effective_user.id):return await update.message.reply_text("❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ.")
-    if len(context.args)!=2:return await update.message.reply_text("ᴜꜱᴀɢᴇ: /ᴀᴅᴅꜱᴜʙꜱ USER_ID DAYS")
-    try:uid=int(context.args[0]);days=int(context.args[1]); assert days>0
-    except:return await update.message.reply_text("❌ ᴜꜱᴇ: /ᴀᴅᴅꜱᴜʙꜱ USER_ID DAYS")
-    try:
-        try:
-            u=await context.bot.get_chat(uid); db.add_user(uid,u.username or "",u.first_name or "")
-        except Exception: u=None
-        start,expiry=db.add_premium(uid,days)
-        name=(u.first_name if u else None) or "ᴜsᴇʀ"; actor=update.effective_user
-        await context.bot.send_message(uid,f"🎉 <b>Congratulations!</b>\n\nYour account has been upgraded to the Premium Ad-Free Tier for the next {days} Days.\nEnjoy high-speed bypass-free file downloads!",parse_mode="HTML")
-        await update.message.reply_text(f"<b>✅ Premium Tier Activated Successfully!</b>\n\n👤 Name: {name}\n🆔 User ID: {uid}\n⏳ Duration Allocated: {days} Days",parse_mode="HTML")
-    except Exception as e:await update.message.reply_text(f"❌ {e}")
-
-async def removesubs(update,context):
-    if not admin_ok(update.effective_user.id):return await update.message.reply_text("❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ.")
-    if len(context.args)!=1:return await update.message.reply_text("ᴜꜱᴀɢᴇ: /ʀᴇᴍᴏᴠᴇꜱᴜʙꜱ USER_ID")
-    uid=int(context.args[0]);old=db.remove_premium(uid)
-    if old:
-        try:await context.bot.send_message(uid,"🚨 <b>Notification:</b> Your premium subscription package has been manually revoked by the management team.",parse_mode="HTML")
-        except Exception:pass
-    await update.message.reply_text(f"✅ ᴘʀᴇᴍɪᴜᴍ ʀᴇᴍᴏᴠᴇᴅ.\n\nᴜꜱᴇʀ: <code>{uid}</code>",parse_mode="HTML")
-
-async def myplan(update, context):
-    uid = update.effective_user.id
-
-    plan = db.get_premium(uid)
-
-    if not plan:
-        return await update.message.reply_text(
-    "💎 <b>ᴍʏ ᴘʟᴀɴ</b>\n\n"
-    "🔴 ꜱᴛᴀᴛᴜꜱ: ꜰʀᴇᴇ ᴘʟᴀɴ\n\n"
-    "⚡ ꜱʜᴏʀᴛᴇɴᴇʀ ʙʏᴘᴀꜱꜱ: ᴅɪꜱᴀʙʟᴇᴅ\n\n"
-    "💎 ɢᴇᴛ ᴘʀᴇᴍɪᴜᴍ ᴛᴏ ᴇɴᴊᴏʏ ꜱʜᴏʀᴛᴇɴᴇʀ-ꜰʀᴇᴇ ᴅᴏᴡɴʟᴏᴀᴅꜱ.\n\n"
-    'ᴄᴏɴᴛᴀᴄᴛ: <a href="https://t.me/Its_Lozo">@ɪᴛꜱ_ʟᴏᴢᴏ</a>',
-    parse_mode="HTML",
-    link_preview_options=LinkPreviewOptions(is_disabled=True)
+        await asyncio.sleep(seconds)
+        await bot.delete_message(chat_id, message_id)
+    except Exception as e:
+        log.debug("Auto delete failed: %s", e)
+
+
+def schedule_delete(chat_id: int, message_id: int, seconds: int):
+    asyncio.create_task(delete_message_later(chat_id, message_id, seconds))
+
+async def send_auto_delete_notice(chat_id: int, minutes: int):
+    if minutes <= 0:
+        return None
+    msg = await bot.send_message(chat_id, f"<i>This File is deleting automatically in {minutes} minutes. Forward in your Saved Messages..!</i>")
+    schedule_delete(chat_id, msg.message_id, minutes * 60)
+    return msg
+
+START_TEXT = (
+    "<b><i>Hi There...! 💥</i></b>\n\n"
+    "<i>I am a file-store bot.\nI can generate links directly with no problems.</i>\n\n"
+    '<b>My Owner:</b> <a href="https://t.me/Its_Lozo">@Its_Lozo</a>'
 )
 
-    try:
-        start = datetime.fromisoformat(
-            plan["starts_at"].replace("Z", "+00:00")
-        )
+def start_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="ABOUT", callback_data="about"), InlineKeyboardButton(text="CLOSE", callback_data="close")]])
 
-        expiry = datetime.fromisoformat(
-            plan["expires_at"].replace("Z", "+00:00")
-        )
+async def send_start_interface(target):
+    image = await get_setting("start_image", None)
+    keyboard = start_keyboard()
+    if isinstance(target, Message):
+        if image:
+            try: return await target.answer_photo(photo=image, caption=START_TEXT, reply_markup=keyboard)
+            except Exception as e: log.warning("Start image failed: %s", e)
+        return await target.answer(START_TEXT, reply_markup=keyboard, link_preview_options=link_preview_disabled())
+    message = target.message
+    if image:
+        try: return await message.answer_photo(photo=image, caption=START_TEXT, reply_markup=keyboard)
+        except Exception as e: log.warning("Start image failed: %s", e)
+    return await message.answer(START_TEXT, reply_markup=keyboard, link_preview_options=link_preview_disabled())
 
-        if start.tzinfo is None:
-            start = start.replace(tzinfo=timezone.utc)
+ABOUT_TEXT = (
+    "<b><i>About Us..</i></b>\n\n<i>➤ Made for : <a href=\"https://t.me/Anime_Hub_94\">Anime Hub</a>\n"
+    "➤ Owner : <a href=\"https://t.me/Its_Lozo\">@Its_Lozo</a>\n"
+    "➤ Developer : <a href=\"https://t.me/Its_Lozo\">@Its_Lozo</a>\n\nAdios !!</i>"
+)
 
-        if expiry.tzinfo is None:
-            expiry = expiry.replace(tzinfo=timezone.utc)
+def about_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="BACK", callback_data="back_start"), InlineKeyboardButton(text="CLOSE", callback_data="close")]])
 
-        now = datetime.now(timezone.utc)
-        remaining = expiry - now
-
-        total_seconds = max(0, int(remaining.total_seconds()))
-
-        days = total_seconds // 86400
-        hours = (total_seconds % 86400) // 3600
-        minutes = (total_seconds % 3600) // 60
-
-        start_text = start.astimezone(IST).strftime(
-            "%d-%m-%Y %I:%M:%S %p"
-        )
-
-        expiry_text = expiry.astimezone(IST).strftime(
-            "%d-%m-%Y %I:%M:%S %p"
-        )
-
-        if total_seconds <= 0:
-            return await update.message.reply_text(
-                "💎 <b>ᴍʏ ᴘʟᴀɴ</b>\n\n"
-                "🔴 ꜱᴛᴀᴛᴜꜱ: ᴘʀᴇᴍɪᴜᴍ ᴇxᴘɪʀᴇᴅ\n\n"
-                "⚡ ꜱʜᴏʀᴛᴇɴᴇʀ ʙʏᴘᴀꜱꜱ: ᴅɪꜱᴀʙʟᴇᴅ",
-                parse_mode="HTML"
-            )
-
-        remaining_text = (
-            f"{days} ᴅᴀʏꜱ, {hours} ʜᴏᴜʀꜱ, {minutes} ᴍɪɴᴜᴛᴇꜱ"
-        )
-
-        text = (
-            "💎 <b>ᴍʏ ᴘʟᴀɴ</b>\n\n"
-            "🟢 ꜱᴛᴀᴛᴜꜱ: ᴘʀᴇᴍɪᴜᴍ ᴀᴄᴛɪᴠᴇ\n\n"
-            f"📅 ᴀᴄᴛɪᴠᴀᴛᴇᴅ ᴏɴ:\n"
-            f"<code>{start_text} IST</code>\n\n"
-            f"⏳ ᴇxᴘɪʀᴇꜱ ᴏɴ:\n"
-            f"<code>{expiry_text} IST</code>\n\n"
-            f"📆 ᴛɪᴍᴇ ʀᴇᴍᴀɪɴɪɴɢ:\n"
-            f"<code>{remaining_text}</code>\n\n"
-            "⚡ ꜱʜᴏʀᴛᴇɴᴇʀ ʙʏᴘᴀꜱꜱ: ᴇɴᴀʙʟᴇᴅ\n\n"
-            "ᴛʜᴀɴᴋ ʏᴏᴜ ꜰᴏʀ ᴜꜱɪɴɢ ᴏᴜʀ ꜱᴇʀᴠɪᴄᴇ ❤️"
-        )
-
-        return await update.message.reply_text(
-            text,
-            parse_mode="HTML"
-        )
-
+@router.callback_query(F.data == "about")
+async def about_callback(callback: CallbackQuery):
+    await callback.answer()
+    try: await callback.message.edit_caption(caption=ABOUT_TEXT, reply_markup=about_keyboard())
     except Exception:
-        log.exception("Myplan failed")
+        try: await callback.message.edit_text(ABOUT_TEXT, reply_markup=about_keyboard())
+        except Exception as e: log.warning("About edit failed: %s", e)
 
-        return await update.message.reply_text(
-            "❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ʟᴏᴀᴅ ʏᴏᴜʀ ᴘʟᴀɴ ᴅᴇᴛᴀɪʟꜱ."
-    )
-        
-async def list_premium(update,context):
-    if not admin_ok(update.effective_user.id):return await update.message.reply_text("❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ.")
-    rows=db.list_premium()
-    if not rows:return await update.message.reply_text("📋 ɴᴏ ᴀᴄᴛɪᴠᴇ ᴘʀᴇᴍɪᴜᴍ ꜱᴜʙꜱᴄʀɪᴘᴛɪᴏɴꜱ.")
-    lines=["<b>💎 ᴘʀᴇᴍɪᴜᴍ ꜱᴜʙꜱᴄʀɪʙᴇʀꜱ</b>",""]
-    for i,r in enumerate(rows,1):
-        uid=int(r["user_id"]);u=next((x for x in db.list_users() if int(x["user_id"])==uid),{})
-        def fmt(v):return datetime.fromisoformat(v.replace("Z","+00:00")).astimezone(IST).strftime("%d-%m-%Y %I:%M:%S %p")
-        lines.append(f"<b>#{i}</b>\n👤 <a href=\"tg://user?id={uid}\">{u.get('first_name') or 'User'}</a>\n🔹 Username: @{u.get('username')}\n🆔 User ID: <code>{uid}</code>\n🟢 Start: <code>{fmt(r.get('starts_at',r['expires_at']))} IST</code>\n🔴 End: <code>{fmt(r['expires_at'])} IST</code>\n")
-    text="\n".join(lines)
-    for pos in range(0,len(text),3900): await update.message.reply_text(text[pos:pos+3900],parse_mode="HTML",disable_web_page_preview=True)
+@router.callback_query(F.data == "back_start")
+async def back_start_callback(callback: CallbackQuery):
+    await callback.answer()
+    try: await callback.message.delete()
+    except Exception: pass
+    await send_start_interface(callback)
 
-async def banuser(update, context):
-    uid = update.effective_user.id
+@router.callback_query(F.data == "close")
+async def close_callback(callback: CallbackQuery):
+    await callback.answer()
+    try: await callback.message.delete()
+    except Exception: pass
 
-    if not admin_ok(uid):
-        return await update.message.reply_text(
-            "❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ."
-        )
-
-    if len(context.args) != 1:
-        return await update.message.reply_text(
-            "❌ ᴜꜱᴀɢᴇ:\n/banuser USER_ID"
-        )
-
-    try:
-        target_id = int(context.args[0])
-    except ValueError:
-        return await update.message.reply_text(
-            "❌ ᴘʟᴇᴀꜱᴇ ᴇɴᴛᴇʀ ᴀ ᴠᴀʟɪᴅ ᴜꜱᴇʀ ɪᴅ."
-        )
-
-    if target_id == OWNER_ID:
-        return await update.message.reply_text(
-            "❌ ᴏᴡɴᴇʀ ᴄᴀɴɴᴏᴛ ʙᴇ ʙᴀɴɴᴇᴅ."
-        )
-
-    if db.is_banned(target_id):
-        return await update.message.reply_text(
-            "⚠️ ᴛʜɪꜱ ᴜꜱᴇʀ ɪꜱ ᴀʟʀᴇᴀᴅʏ ʙᴀɴɴᴇᴅ."
-        )
-
-    db.ban_user(target_id)
-
-    try:
-        await context.bot.send_message(
-            target_id,
-            "🚫 <b>You Are Banned From Using The Bot</b> 🚫",
-            parse_mode="HTML"
-        )
-    except Exception:
-        pass
-
-    await update.message.reply_text(
-        f"✅ <b>ᴜꜱᴇʀ ʙᴀɴɴᴇᴅ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ.</b>\n\n"
-        f"🆔 <code>{target_id}</code>",
-        parse_mode="HTML"
+@router.channel_post()
+async def remember_channel_post(message: Message):
+    kind = media_kind(message)
+    if not kind: return
+    await asyncio.gather(
+        posts.update_one(
+            {"chat_id": message.chat.id, "message_id": message.message_id},
+            {"$set": {
+                "chat_id": message.chat.id, "message_id": message.message_id,
+                "kind": kind, "file_unique_id": get_file_unique_id(message),
+                "created_at": message.date, "caption": message.caption, "text": message.text,
+            }}, upsert=True),
+        channels.update_one(
+            {"chat_id": message.chat.id},
+            {"$set": {"chat_id": message.chat.id, "title": message.chat.title, "username": message.chat.username}},
+            upsert=True),
     )
 
+async def get_fsub_channels(): return await get_setting("fsub_channels", [])
+async def save_fsub_channels(items): await set_setting("fsub_channels", items)
 
-async def unbanuser(update, context):
-    uid = update.effective_user.id
-
-    if not admin_ok(uid):
-        return await update.message.reply_text(
-            "❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ."
-        )
-
-    if len(context.args) != 1:
-        return await update.message.reply_text(
-            "❌ ᴜꜱᴀɢᴇ:\n/unbanuser USER_ID"
-        )
-
+async def check_user_joined(user_id: int, channel_id):
     try:
-        target_id = int(context.args[0])
-    except ValueError:
-        return await update.message.reply_text(
-            "❌ ᴘʟᴇᴀꜱᴇ ᴇɴᴛᴇʀ ᴀ ᴠᴀʟɪᴅ ᴜꜱᴇʀ ɪᴅ."
-        )
+        member = await bot.get_chat_member(channel_id, user_id)
+        raw = getattr(member, "status", None)
+        status = str(getattr(raw, "value", raw)).lower()
+        if status in ("creator", "administrator", "member"): return True
+        if status == "restricted": return bool(getattr(member, "is_member", False))
+        return False
+    except Exception as e:
+        log.warning("FSUB CHECK ERROR user=%s channel=%s: %s", user_id, channel_id, e)
+        return False
 
-    if not db.is_banned(target_id):
-        return await update.message.reply_text(
-            "⚠️ ᴛʜɪꜱ ᴜꜱᴇʀ ɪꜱ ɴᴏᴛ ʙᴀɴɴᴇᴅ."
-        )
+async def build_fsub_message(user_id: int):
+    fsubs = await get_fsub_channels()
+    if not fsubs:
+        return None, None, True
 
-    db.unban_user(target_id)
+    # Telegram membership checks are independent, so do them concurrently.
+    results = await asyncio.gather(
+        *(check_user_joined(user_id, channel.get("chat_id")) for channel in fsubs),
+        return_exceptions=True,
+    )
+    lines = ["🔵 <b>Hello There..!⚡</b>", "", "⭕ Please join all of our channels first then try again..!", "", "<b>Channel Subscription Status:</b>", ""]
+    buttons, all_joined = [], True
+    for i, (channel, result) in enumerate(zip(fsubs, results), 1):
+        joined = bool(result) if not isinstance(result, Exception) else False
+        title = channel.get("title", "Channel")
+        if joined:
+            lines.append(f"{i}. <b>{title}</b> - <b>JOINED</b> ✅")
+        else:
+            all_joined = False
+            lines.append(f"{i}. <b>{title}</b> - <b>NOT JOINED</b> ❌")
+            invite = channel.get("invite_link")
+            if invite:
+                buttons.append([InlineKeyboardButton(text=f"Join {title}", url=invite)])
+    if not all_joined:
+        buttons.append([InlineKeyboardButton(text="🔄 Try Again", callback_data="fsub_check")])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None, all_joined
 
-    try:
-        await context.bot.send_message(
-            target_id,
-            "✅ <b>Your ban has been removed.</b>\n\n"
-            "You can use the bot again.",
-            parse_mode="HTML"
-        )
+
+async def show_fsub(message: Message):
+    if not message.from_user: return False
+    text, keyboard, all_joined = await build_fsub_message(message.from_user.id)
+    if all_joined: return False
+    image = await get_setting("start_image", None)
+    if image:
+        try:
+            await message.answer_photo(photo=image, caption=text, reply_markup=keyboard); return True
+        except Exception: pass
+    await message.answer(text, reply_markup=keyboard); return True
+
+@router.callback_query(F.data == "fsub_check")
+async def fsub_check_callback(callback: CallbackQuery):
+    text, keyboard, all_joined = await build_fsub_message(callback.from_user.id)
+    if all_joined:
+        await callback.answer("✅ All channels joined!")
+        try: await callback.message.delete()
+        except Exception: pass
+        await send_start_interface(callback); return
+    await callback.answer("❌ You haven't joined all channels yet.", show_alert=True)
+    try: await callback.message.edit_caption(caption=text, reply_markup=keyboard)
     except Exception:
-        pass
+        try: await callback.message.edit_text(text, reply_markup=keyboard)
+        except Exception: pass
 
-    await update.message.reply_text(
-        f"✅ <b>ᴜꜱᴇʀ ᴜɴʙᴀɴɴᴇᴅ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ.</b>\n\n"
-        f"🆔 <code>{target_id}</code>",
-        parse_mode="HTML"
-                       )
-    
-async def banuser_list(update, context):
-    uid = update.effective_user.id
-
-    if not admin_ok(uid):
-        return await update.message.reply_text("❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ.")
-
-    banned_users = db.list_banned_users()
-
-    if not banned_users:
-        return await update.message.reply_text(
-            "📋 <b>ᴜɴɢᴀɴɢ ᴜꜱᴇʀ ʟɪꜱᴛ</b>\n\n"
-            "✅ ɴᴏ ᴜꜱᴇʀ ɪꜱ ᴄᴜʀʀᴇɴᴛʟʏ ʙᴀɴɴᴇᴅ.",
-            parse_mode="HTML"
-        )
-
-    lines = [
-        "🚫 <b>ʙᴀɴɴᴇᴅ ᴜꜱᴇʀꜱ</b>",
-        ""
-    ]
-
-    for i, row in enumerate(banned_users, 1):
-        user_id = int(row["user_id"])
-
-        try:
-            user = await context.bot.get_chat(user_id)
-
-            name = user.full_name or "Unknown"
-            username = (
-                f"@{user.username}"
-                if user.username
-                else "No Username"
-            )
-
-            profile_link = f'<a href="tg://user?id={user_id}">{name}</a>'
-
-        except Exception:
-            name = "Unknown"
-            username = "No Username"
-            profile_link = f'<a href="tg://user?id={user_id}">Unknown User</a>'
-
-        lines.append(
-            f"<b>{i}.</b> {profile_link}\n"
-            f"👤 Name: <code>{name}</code>\n"
-            f"🔗 Username: {username}\n"
-            f"🆔 UID: <code>{user_id}</code>\n"
-            f"━━━━━━━━━━━━━━"
-        )
-
-    text = "\n".join(lines)
-
-    # Telegram message limit protection
-    if len(text) <= 4000:
-        return await update.message.reply_text(
-            text,
-            parse_mode="HTML",
-            disable_web_page_preview=True
-        )
-
-    # Split into multiple messages
-    chunk = ""
-
-    for line in lines:
-        if len(chunk) + len(line) + 1 > 4000:
-            await update.message.reply_text(
-                chunk,
-                parse_mode="HTML",
-                disable_web_page_preview=True
-            )
-            chunk = ""
-
-        chunk += line + "\n"
-
-    if chunk:
-        await update.message.reply_text(
-            chunk,
-            parse_mode="HTML",
-            disable_web_page_preview=True
-        )
-
-async def users(update,context):
-    if not admin_ok(update.effective_user.id):return await update.message.reply_text("❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ.")
-    rows=db.list_users();lines=[f"<b>👥 ᴜꜱᴇʀꜱ: {len(rows)}</b>",""]
-    for r in rows:
-        uid=int(r["user_id"]);name=r.get("first_name") or "User";uname=("@"+r["username"]) if r.get("username") else "—"
-        lines.append(f"• <a href=\"tg://user?id={uid}\">{name}</a> | {uname} | <code>{uid}</code>")
-    text="\n".join(lines)
-    for pos in range(0,len(text),3900):await update.message.reply_text(text[pos:pos+3900],parse_mode="HTML",disable_web_page_preview=True)
-
-async def broadcast(update,context):
-    if not admin_ok(update.effective_user.id):return await update.message.reply_text("❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ.")
-    replied=update.message.reply_to_message
-    if not replied:return await update.message.reply_text("ʀᴇᴘʟʏ ᴛᴏ ᴛʜᴇ ᴍᴇꜱꜱᴀɢᴇ ʏᴏᴜ ᴡᴀɴᴛ ᴛᴏ ʙʀᴏᴀᴅᴄᴀꜱᴛ.\n\n/ʙʀᴏᴀᴅᴄᴀꜱᴛ\n/ʙʀᴏᴀᴅᴄᴀꜱᴛ 24ʜ")
-    arg=(context.args[0].lower() if context.args else "")
-    delete_after=None; mode="BROADCAST"; lifespan="Permanent"
-    if arg.endswith("h"):
-        try: hours=int(arg[:-1]); delete_after=datetime.now(timezone.utc)+timedelta(hours=hours);mode="PBROADCAST";lifespan=arg
-        except: pass
-    rows=db.list_users();total=len(rows);success=blocked=failed=0;sent=[]
-    for r in rows:
-        uid=int(r["user_id"])
-        try:
-            m=await context.bot.copy_message(uid,replied.chat_id,replied.message_id);success+=1;sent.append((uid,m.message_id))
-        except Exception as e:
-            if "blocked" in str(e).lower() or "chat not found" in str(e).lower():
-                blocked+=1
-                try: db.delete_user(uid)
-                except: pass
-            else:failed+=1
-    if delete_after:
-        # Schedule deletion of the broadcast copies.
-        async def delete_broadcast_job(ctx):
-            for uid,mid in sent:
-                try:await ctx.bot.delete_message(uid,mid)
-                except:pass
-        context.job_queue.run_once(delete_broadcast_job,(delete_after-datetime.now(timezone.utc)).total_seconds())
-    stats=(f"📢 <b>BROADCAST COMPLETED!</b>\n\n📊 <b>Stats Report:</b>\n• Total Users DB: {total}\n• Successful: {success}\n• Blocked Users Wiped: {blocked}\n• Deleted Accounts Wiped: 0\n• Unsuccessful/Failed: {failed}\n\n⚙️ Config Mode: {mode}\n⏱ Task Lifespan: {lifespan}")
-    await update.message.reply_text(stats,parse_mode="HTML")
-
-async def channel_post_indexer(update, context):
-    post = update.channel_post
-
-    if not post or post.chat_id != DB_CHANNEL_ID:
+@router.message(CommandStart())
+async def start(message: Message):
+    await ensure_user(message)
+    if await users.find_one({"user_id": message.from_user.id, "banned": True}):
+        return await message.answer("🚫 You are banned from using this bot.")
+    args = (message.text or "").split(maxsplit=1)
+    if len(args) == 2 and args[1].startswith("batch_"):
+        if await show_fsub(message): return
+        batch_data = await batches.find_one({"_id": args[1][6:]})
+        if not batch_data: return await message.answer("❌ Batch not found or expired.")
+        items = batch_data.get("items", [])
+        if not items: return await message.answer("❌ This batch is empty.")
+        wait_msg = await message.answer("Please Wait.....")
+        sent_messages = []
+        for item in items:
+            try:
+                copied = await bot.copy_message(chat_id=message.chat.id, from_chat_id=item["chat_id"], message_id=item["message_id"])
+                sent_messages.append(copied); await asyncio.sleep(0.02)
+            except Exception as e: log.warning("Batch copy failed: %s", e)
+        try: await wait_msg.delete()
+        except Exception: pass
+        minutes = await get_setting("auto_delete_minutes", 5)
+        if minutes and minutes > 0:
+            for sent in sent_messages: schedule_delete(message.chat.id, sent.message_id, minutes * 60)
+            await send_auto_delete_notice(message.chat.id, minutes)
         return
+    if await show_fsub(message): return
+    await send_start_interface(message)
+
+@router.message(Command("genlink"))
+async def genlink(message: Message):
+    await ensure_user(message)
+    if not await is_mod(message.from_user.id): return await message.answer("⛔ Only Owner, Admins and Moderators can generate links.")
+    if not message.reply_to_message: return await message.answer("Reply to any message/file and use <code>/genlink</code>.")
+    if not media_kind(message.reply_to_message): return await message.answer("❌ This message cannot be stored.")
+    bid = uuid.uuid4().hex[:16]
+    await batches.insert_one({"_id": bid, "items": [{"chat_id": message.reply_to_message.chat.id, "message_id": message.reply_to_message.message_id}], "created_by": message.from_user.id, "created_at": now(), "type": "genlink"})
+    username = await get_bot_username()
+    await message.answer(f"🔗 <b>Link created!</b>\n\nhttps://t.me/{username}?start=batch_{bid}", link_preview_options=link_preview_disabled())
+
+@router.message(Command("batch"))
+async def batch(message: Message):
+    await ensure_user(message)
+    if not await is_mod(message.from_user.id): return await message.answer("⛔ Only Owner, Admins and Moderators can create batches.")
+    parts = (message.text or "").split()
+    if len(parts) != 3: return await message.answer("Usage:\n<code>/batch LINK1 LINK2</code>\n\nBoth links must be from the same channel.")
+    first, second = parse_link(parts[1]), parse_link(parts[2])
+    if not first or not second: return await message.answer("❌ Invalid Telegram channel post link.")
+    if first[0] != second[0]: return await message.answer("❌ Both posts must be from the same channel.")
+    lo, hi = sorted([first[1], second[1]])
+    docs = await posts.find({"chat_id": first[0], "message_id": {"$gte": lo, "$lte": hi}}).sort("message_id", 1).to_list(length=None)
+    allowed = {"photo","video","document","audio","voice","animation","sticker","text"}
+    items, seen = [], set()
+    for doc in docs:
+        key = (doc.get("chat_id"), doc.get("message_id"))
+        if doc.get("kind") in allowed and key not in seen:
+            seen.add(key); items.append({"chat_id": key[0], "message_id": key[1]})
+    if not items: return await message.answer("❌ No supported media/text posts found between these two links.")
+    bid = uuid.uuid4().hex[:16]
+    await batches.insert_one({"_id": bid, "items": items, "created_by": message.from_user.id, "created_at": now(), "type": "batch"})
+    username = await get_bot_username()
+    await message.answer(f"✅ <b>Batch created!</b>\n\n📦 Items: <b>{len(items)}</b>\n🔗 https://t.me/{username}?start=batch_{bid}", link_preview_options=link_preview_disabled())
+
+# ---------------- STAFF ----------------
+
+def user_id_arg(message: Message):
+    parts = (message.text or "").split()
+    return int(parts[1]) if len(parts) == 2 and parts[1].isdigit() else None
+
+@router.message(Command("addadmin"))
+async def addadmin(message: Message):
+    if not is_owner(message.from_user.id): return await message.answer("⛔ Owner only.")
+    uid = user_id_arg(message)
+    if uid is None: return await message.answer("Usage:\n<code>/addadmin USER_ID</code>")
+    name = await get_user_name(uid); await admins.update_one({"user_id":uid},{"$set":{"user_id":uid,"name":name}},upsert=True)
+    await message.answer(f"✅ <b>Admin added!</b>\n\n👤 {profile_link(uid,name)}\n🆔 <code>{uid}</code>")
+
+@router.message(Command("deladmin"))
+async def deladmin(message: Message):
+    if not is_owner(message.from_user.id): return await message.answer("⛔ Owner only.")
+    uid = user_id_arg(message)
+    if uid is None: return await message.answer("Usage:\n<code>/deladmin USER_ID</code>")
+    await admins.delete_one({"user_id":uid}); await message.answer("✅ Admin removed.")
+
+@router.message(Command("addmod"))
+async def addmod(message: Message):
+    if not await is_admin(message.from_user.id): return await message.answer("⛔ Admin only.")
+    uid = user_id_arg(message)
+    if uid is None: return await message.answer("Usage:\n<code>/addmod USER_ID</code>")
+    name = await get_user_name(uid); await mods.update_one({"user_id":uid},{"$set":{"user_id":uid,"name":name}},upsert=True)
+    await message.answer(f"✅ <b>Moderator added!</b>\n\n👤 {profile_link(uid,name)}\n🆔 <code>{uid}</code>")
+
+@router.message(Command("delmod"))
+async def delmod(message: Message):
+    if not await is_admin(message.from_user.id): return await message.answer("⛔ Admin only.")
+    uid = user_id_arg(message)
+    if uid is None: return await message.answer("Usage:\n<code>/delmod USER_ID</code>")
+    await mods.delete_one({"user_id":uid}); await message.answer("✅ Moderator removed.")
+
+@router.message(Command("admins"))
+async def admins_list(message: Message):
+    if not await is_mod(message.from_user.id): return await message.answer("⛔ Admin/Moderator only.")
+    owner_data = await users.find_one({"user_id":OWNER_ID}); owner_name=(owner_data or {}).get("first_name") or (owner_data or {}).get("username") or "Owner"
+    text=f"👑 <b>Owner</b>\n{profile_link(OWNER_ID,owner_name)}\n🆔 <code>{OWNER_ID}</code>\n\n🛡 <b>Admins</b>\n"
+    data=await admins.find().to_list(length=None)
+    text += "".join(f"• {profile_link(x['user_id'],x.get('name') or await get_user_name(x['user_id']))} — <code>{x['user_id']}</code>\n" for x in data) if data else "• None\n"
+    text += "\n🛡 <b>Moderators</b>\n"; data=await mods.find().to_list(length=None)
+    text += "".join(f"• {profile_link(x['user_id'],x.get('name') or await get_user_name(x['user_id']))} — <code>{x['user_id']}</code>\n" for x in data) if data else "• None\n"
+    await message.answer(text)
+
+@router.message(Command("ban"))
+async def ban(message: Message):
+    if not await is_mod(message.from_user.id): return await message.answer("⛔ Moderator/Admin only.")
+    uid=user_id_arg(message)
+    if uid is None: return await message.answer("Usage:\n<code>/ban USER_ID</code>")
+    await users.update_one({"user_id":uid},{"$set":{"banned":True}},upsert=True); await message.answer("🚫 User banned.")
+
+@router.message(Command("unban"))
+async def unban(message: Message):
+    if not await is_mod(message.from_user.id): return await message.answer("⛔ Moderator/Admin only.")
+    uid=user_id_arg(message)
+    if uid is None: return await message.answer("Usage:\n<code>/unban USER_ID</code>")
+    await users.update_one({"user_id":uid},{"$set":{"banned":False}},upsert=True); await message.answer("✅ User unbanned.")
+
+# ---------------- BROADCAST ----------------
+
+def parse_broadcast_duration(command_text: str):
+    parts=(command_text or "").split()
+    if len(parts)==1: return 0,None
+    if len(parts)!=2: return None,"Usage:\n<code>/broadcast</code>\n<code>/broadcast 24h</code>"
+    m=re.fullmatch(r"([1-9]\d*)h",parts[1].lower())
+    if not m: return None,"❌ Invalid time.\n\nUse format like:\n<code>/broadcast 1h</code>\n<code>/broadcast 24h</code>"
+    return int(m.group(1))*3600,None
+
+def broadcast_interface_keyboard(delete_seconds:int):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 SEND BROADCAST",callback_data=f"broadcast_confirm:{delete_seconds}")],
+        [InlineKeyboardButton(text="❌ CANCEL",callback_data="broadcast_cancel")],
+    ])
+
+def format_broadcast_duration(seconds:int):
+    if seconds<=0:return "PERMANENT ♾️"
+    hours=seconds//3600
+    return "1 HOUR" if hours==1 else f"{hours} HOURS"
+
+@router.message(Command("broadcast"))
+async def broadcast(message: Message):
+    if not await is_mod(message.from_user.id): return await message.answer("⛔ Moderator/Admin only.")
+    if not message.reply_to_message:
+        return await message.answer("📢 <b>Broadcast</b>\n\nReply to the message you want to broadcast.\n\n<b>Permanent:</b>\n<code>/broadcast</code>\n\n<b>Auto Delete:</b>\n<code>/broadcast 24h</code>")
+    delete_seconds,error=parse_broadcast_duration(message.text or "")
+    if error:return await message.answer(error)
+    source=message.reply_to_message
+    if not media_kind(source):return await message.answer("❌ This message type cannot be broadcast.")
+    await migrate_legacy_users_once()
+    count=await users.count_documents({"banned":{"$ne":True}})
+    interface_text=("📢 <b>BROADCAST INTERFACE</b>\n\n━━━━━━━━━━━━━━━━━━\n"
+                    f"📨 Message Type: <b>{media_kind(source).upper()}</b>\n"
+                    f"👥 Recipients: <b>{count}</b>\n"
+                    f"⏱ Lifespan: <b>{format_broadcast_duration(delete_seconds)}</b>\n"
+                    "━━━━━━━━━━━━━━━━━━\n\n")
+    interface_text += ("♾️ <b>Permanent Broadcast</b>\nThe broadcasted message will remain in users' chats permanently." if delete_seconds==0 else f"🗑 <b>Auto Delete Enabled</b>\nThe broadcasted message will be deleted after <b>{delete_seconds//3600} hour(s)</b>.")
+    interface_text += "\n\nPress <b>SEND BROADCAST</b> to continue."
+
+    # IMPORTANT: save the exact source message in MongoDB. Do not depend on
+    # interface.reply_to_message, because Telegram does not guarantee that a
+    # bot's answer message contains reply_to_message.
+    session_id=uuid.uuid4().hex
+    interface=await message.answer(interface_text,reply_markup=broadcast_interface_keyboard(delete_seconds))
+    await broadcasts.insert_one({
+        "_id": f"session_{session_id}", "type": "broadcast_session",
+        "session_id": session_id, "owner_user_id": message.from_user.id,
+        "interface_chat_id": interface.chat.id, "interface_message_id": interface.message_id,
+        "source_chat_id": source.chat.id, "source_message_id": source.message_id,
+        "reply_markup": source.reply_markup.model_dump() if source.reply_markup else None,
+        "delete_seconds": delete_seconds, "created_at": now(), "status": "pending",
+    })
+
+async def copy_broadcast_message(uid: int, source_chat_id: int, source_message_id: int, reply_markup=None):
+    """Copy with FloodWait retry. copy_message keeps the broadcast clean and
+    works for text, media, stickers, animations, etc."""
+    for attempt in range(3):
+        try:
+            return await bot.copy_message(
+                chat_id=uid,
+                from_chat_id=source_chat_id,
+                message_id=source_message_id,
+                reply_markup=InlineKeyboardMarkup.model_validate(reply_markup) if reply_markup else None,
+            )
+        except TelegramRetryAfter as e:
+            wait = int(getattr(e, "retry_after", 1)) + 1
+            log.warning("FloodWait while broadcasting to %s; sleeping %ss", uid, wait)
+            await asyncio.sleep(wait)
+        except Exception:
+            raise
+    raise RuntimeError("Telegram FloodWait did not clear after retries")
+
+
+async def execute_broadcast(source_chat_id: int, source_message_id: int, delete_seconds: int, reply_markup=None):
+    # Import the old audience only once for a fresh clone.
+    await migrate_legacy_users_once()
+    recipients = await users.find(
+        {"banned": {"$ne": True}, "user_id": {"$exists": True}},
+        {"user_id": 1},
+    ).to_list(length=None)
+
+    seen = set()
+    user_ids = []
+    for user in recipients:
+        uid = user.get("user_id")
+        if uid and uid not in seen:
+            seen.add(uid)
+            user_ids.append(uid)
+
+    total = len(user_ids)
+    successful = blocked_wiped = deleted_wiped = failed = 0
+    semaphore = asyncio.Semaphore(BROADCAST_CONCURRENCY)
+
+    async def send_one(uid):
+        async with semaphore:
+            try:
+                copied = await copy_broadcast_message(uid, source_chat_id, source_message_id, reply_markup)
+                return ("ok", uid, copied.message_id, None)
+            except Exception as e:
+                err = str(e).lower()
+                if "bot was blocked" in err or "user is deactivated" in err or "forbidden" in err:
+                    return ("deactivated" if "deactivated" in err else "blocked", uid, None, str(e))
+                if "chat not found" in err or "user not found" in err:
+                    return ("deleted", uid, None, str(e))
+                log.warning("Broadcast failed to %s: %s", uid, e)
+                return ("failed", uid, None, str(e))
+
+    # Small chunks prevent thousands of asyncio Tasks from being created at once.
+    chunk_size = max(BROADCAST_CONCURRENCY * 5, 20)
+    for pos in range(0, len(user_ids), chunk_size):
+        chunk = user_ids[pos:pos + chunk_size]
+        results = await asyncio.gather(*(send_one(uid) for uid in chunk))
+        deliveries = []
+        blocked_ids, deleted_ids = [], []
+        created = now()
+        delete_at = created + timedelta(seconds=delete_seconds) if delete_seconds > 0 else None
+
+        for status, uid, message_id, error in results:
+            if status == "ok":
+                successful += 1
+                deliveries.append({
+                    "type": "broadcast_delivery",
+                    "broadcast_message_id": message_id,
+                    "user_id": uid,
+                    "source_chat_id": source_chat_id,
+                    "source_message_id": source_message_id,
+                    "created_at": created,
+                    "delete_at": delete_at,
+                    "delete_seconds": delete_seconds,
+                    "deleted": False,
+                })
+            elif status == "blocked":
+                blocked_wiped += 1
+                blocked_ids.append(uid)
+            elif status in ("deactivated", "deleted"):
+                deleted_wiped += 1
+                deleted_ids.append(uid)
+            else:
+                failed += 1
+
+        if deliveries:
+            await broadcasts.insert_many(deliveries, ordered=False)
+        wipe_ids = blocked_ids + deleted_ids
+        if wipe_ids:
+            await users.delete_many({"user_id": {"$in": wipe_ids}})
+
+    return {
+        "total_users": total,
+        "successful": successful,
+        "blocked_wiped": blocked_wiped,
+        "deleted_wiped": deleted_wiped,
+        "failed": failed,
+    }
+
+
+@router.callback_query(F.data.startswith("broadcast_confirm:"))
+async def broadcast_confirm(callback: CallbackQuery):
+    if not await is_mod(callback.from_user.id): return await callback.answer("⛔ Moderator/Admin only.",show_alert=True)
+    try: delete_seconds=int(callback.data.split(":",1)[1])
+    except Exception:return await callback.answer("❌ Invalid broadcast settings.",show_alert=True)
+
+    # FIX: identify the session by the callback/interface message IDs,
+    # then read the original replied message from MongoDB.
+    session=await broadcasts.find_one({
+        "type":"broadcast_session",
+        "interface_chat_id":callback.message.chat.id,
+        "interface_message_id":callback.message.message_id,
+        "status":"pending",
+    })
+    if not session:
+        return await callback.answer("❌ Broadcast session expired.",show_alert=True)
+    if int(session.get("delete_seconds",-1)) != delete_seconds:
+        return await callback.answer("❌ Broadcast session expired.",show_alert=True)
+
+    # Claim atomically so two taps cannot start the same broadcast twice.
+    claimed=await broadcasts.find_one_and_update(
+        {"_id":session["_id"],"status":"pending"},
+        {"$set":{"status":"running","started_at":now()}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if not claimed:
+        return await callback.answer("⚠️ Broadcast is already running or finished.",show_alert=True)
+
+    await callback.answer("📢 Broadcast started...")
+    try: await callback.message.edit_text("📢 <b>BROADCAST STARTED</b>\n\n⏳ Sending message to users...\nPlease wait...")
+    except Exception: pass
+    try:
+        result=await execute_broadcast(session["source_chat_id"],session["source_message_id"],delete_seconds,session.get("reply_markup"))
+        report=("📢 <u><b>BROADCAST COMPLETED!</b></u>\n\n📊 <b>Stats Report:</b>\n"
+                f"• Total Users DB: <b>{result['total_users']}</b>\n• Successful: <b>{result['successful']}</b>\n"
+                f"• Blocked Users Wiped: <b>{result['blocked_wiped']}</b>\n• Deleted Accounts Wiped: <b>{result['deleted_wiped']}</b>\n"
+                f"• Unsuccessful/Failed: <b>{result['failed']}</b>\n\n⚙️ <b>Config Mode:</b> {'PBROADCAST' if delete_seconds==0 else 'TBROADCAST'}\n"
+                f"⏱ <b>Task Lifespan:</b> {format_broadcast_duration(delete_seconds)}")
+        await broadcasts.update_one({"_id":session["_id"]},{"$set":{"status":"completed","completed_at":now(),"result":result}})
+        try: await callback.message.edit_text(report)
+        except Exception: await callback.message.answer(report)
+    except Exception as e:
+        log.exception("Broadcast execution error: %s",e)
+        await broadcasts.update_one({"_id":session["_id"]},{"$set":{"status":"failed","failed_at":now(),"error":str(e)[:2000]}})
+        try: await callback.message.edit_text(f"❌ <b>Broadcast failed.</b>\n\n<code>{str(e)[:1000]}</code>")
+        except Exception: pass
+
+@router.callback_query(F.data=="broadcast_cancel")
+async def broadcast_cancel(callback:CallbackQuery):
+    if not await is_mod(callback.from_user.id):return await callback.answer("⛔ Moderator/Admin only.",show_alert=True)
+    session=await broadcasts.find_one_and_update(
+        {"type":"broadcast_session","interface_chat_id":callback.message.chat.id,"interface_message_id":callback.message.message_id,"status":"pending"},
+        {"$set":{"status":"cancelled","cancelled_at":now()}},return_document=True)
+    await callback.answer("❌ Broadcast cancelled.")
+    try: await callback.message.edit_text("❌ <b>Broadcast cancelled.</b>")
+    except Exception: pass
+
+@router.message(F.reply_to_message)
+async def capture_broadcast_reply(message: Message):
+    if not message.from_user:return
+    record=await broadcasts.find_one({"type":"broadcast_delivery","user_id":message.chat.id,"broadcast_message_id":message.reply_to_message.message_id})
+    if not record:return
+    info=(f"📩 <b>Broadcast Reply</b>\n\n👤 {message.from_user.full_name}\n🆔 <code>{message.from_user.id}</code>\n💬 {message.text or '[media/message]'}")
+    try:
+        await bot.send_message(OWNER_ID,info)
+        await bot.forward_message(OWNER_ID,message.chat.id,message.message_id)
+    except Exception as e:log.warning("Broadcast reply forwarding failed: %s",e)
+
+# ---------------- SETTINGS / FSUB ----------------
+
+def settings_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🖼 Set Image",callback_data="settings_image")],
+        [InlineKeyboardButton(text="⏱ Auto Delete",callback_data="settings_autodelete")],
+        [InlineKeyboardButton(text="📢 Force Subscribe",callback_data="settings_fsub")],
+        [InlineKeyboardButton(text="👑 Admins",callback_data="settings_admins")],
+        [InlineKeyboardButton(text="🛡 Moderators",callback_data="settings_mods")],
+        [InlineKeyboardButton(text="❌ Close",callback_data="close")],
+    ])
+
+@router.message(Command("settings"))
+async def settings_command(message:Message):
+    if not await is_admin(message.from_user.id):return await message.answer("⛔ Admin only.")
+    await message.answer("⚙️ <b>Sir, yahan se aap bot ki settings manage kar sakte hain.</b>\n\n<i>Please choose an option below.</i>",reply_markup=settings_keyboard())
+
+@router.message(Command("setimage"))
+async def setimage(message:Message):
+    if not await is_admin(message.from_user.id):return await message.answer("⛔ Admin only.")
+    if message.reply_to_message and message.reply_to_message.photo:
+        await set_setting("start_image",message.reply_to_message.photo[-1].file_id);return await message.answer("✅ <b>Start image updated successfully.</b>")
+    await message.answer("🖼 <b>Set Start Image</b>\n\nPhoto ke reply me <code>/setimage</code> use karo.")
+
+@router.callback_query(F.data=="settings_image")
+async def settings_image_callback(callback:CallbackQuery):
+    if not await is_admin(callback.from_user.id):return await callback.answer("⛔ Admin only.",show_alert=True)
+    await callback.answer();await callback.message.edit_text("🖼 <b>Set Start Image</b>\n\nAb yahin koi bhi new photo bhej dijiye.",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back",callback_data="settings_back")]]))
+    await settings.update_one({"_id":LOCAL_SETTINGS_ID},{"$addToSet":{"pending_image_users":callback.from_user.id}},upsert=True)
+
+@router.message(F.photo)
+async def receive_new_start_image(message:Message):
+    if not message.from_user or not await is_admin(message.from_user.id):return
+    data=await settings.find_one({"_id":LOCAL_SETTINGS_ID});pending=(data or {}).get("pending_image_users",[])
+    if message.from_user.id not in pending:return
+    await set_setting("start_image",message.photo[-1].file_id)
+    await settings.update_one({"_id":LOCAL_SETTINGS_ID},{"$pull":{"pending_image_users":message.from_user.id}})
+    await message.answer("✅ <b>Start image updated successfully.</b>")
+
+@router.callback_query(F.data=="settings_autodelete")
+async def settings_autodelete(callback:CallbackQuery):
+    if not await is_admin(callback.from_user.id):return await callback.answer("⛔ Admin only.",show_alert=True)
+    current=await get_setting("auto_delete_minutes",5);await callback.answer()
+    kb=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="1 Minute",callback_data="ad_1"),InlineKeyboardButton(text="5 Minutes",callback_data="ad_5")],[InlineKeyboardButton(text="10 Minutes",callback_data="ad_10"),InlineKeyboardButton(text="30 Minutes",callback_data="ad_30")],[InlineKeyboardButton(text="60 Minutes",callback_data="ad_60"),InlineKeyboardButton(text="OFF",callback_data="ad_0")],[InlineKeyboardButton(text="🔙 Back",callback_data="settings_back")]])
+    await callback.message.edit_text(f"⏱ <b>Auto Delete Settings</b>\n\nCurrent: <b>{current} minutes</b>",reply_markup=kb)
+
+@router.callback_query(F.data.startswith("ad_"))
+async def set_autodelete(callback:CallbackQuery):
+    if not await is_admin(callback.from_user.id):return await callback.answer("⛔ Admin only.",show_alert=True)
+    minutes=int(callback.data.split("_")[1]);await set_setting("auto_delete_minutes",minutes);await callback.answer("✅ Auto delete updated!");await callback.message.edit_text(f"⏱ <b>Auto Delete Settings</b>\n\nCurrent: <b>{'OFF' if minutes==0 else f'{minutes} minutes'}</b>",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back",callback_data="settings_back")]]))
+
+def fsub_settings_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➕ Add FSub",callback_data="fsub_add_info")],[InlineKeyboardButton(text="➖ Remove FSub",callback_data="fsub_remove_info")],[InlineKeyboardButton(text="📋 Refresh List",callback_data="settings_fsub")],[InlineKeyboardButton(text="🔙 Back",callback_data="settings_back")]])
+
+@router.callback_query(F.data=="settings_fsub")
+async def settings_fsub(callback:CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        return await callback.answer("⛔ Admin only.", show_alert=True)
+
+    fsubs = await get_fsub_channels()
+    text = f"📢 <b>Force Subscription</b>\n\nChannels: <b>{len(fsubs)}/4</b>\n\n"
+
+    for i, c in enumerate(fsubs, 1):
+        title = c.get("title") or "Channel"
+        invite = c.get("invite_link")
+        if invite:
+            text += f'{i}. <a href="{invite}"><b>{title}</b></a>\n'
+        else:
+            text += f"{i}. <b>{title}</b>\n"
+
+    text += (
+        "\n<b>Add:</b> <code>/addfsub CHANNEL_ID</code>\n"
+        "<b>Remove:</b> <code>/delfsub CHANNEL_ID</code>\n\n"
+        "Bot ko channel me admin banana zaroori hai."
+    )
+
+    await callback.answer()
+    try:
+        await callback.message.edit_text(text, reply_markup=fsub_settings_keyboard())
+    except Exception as e:
+        log.warning("FSub settings edit failed: %s", e)
+        try:
+            await callback.message.edit_caption(caption=text, reply_markup=fsub_settings_keyboard())
+        except Exception:
+            pass
+
+@router.callback_query(F.data=="fsub_add_info")
+async def fsub_add_info(callback:CallbackQuery):
+    if not await is_admin(callback.from_user.id):return await callback.answer("⛔ Admin only.",show_alert=True)
+    await callback.answer();await callback.message.edit_text("➕ <b>Add FSub Channel</b>\n\n<code>/addfsub -1001234567890</code>",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back",callback_data="settings_fsub")]]))
+
+@router.callback_query(F.data=="fsub_remove_info")
+async def fsub_remove_info(callback:CallbackQuery):
+    if not await is_admin(callback.from_user.id):return await callback.answer("⛔ Admin only.",show_alert=True)
+    await callback.answer();await callback.message.edit_text("➖ <b>Remove FSub Channel</b>\n\n<code>/delfsub -1001234567890</code>",reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back",callback_data="settings_fsub")]]))
+
+@router.message(Command("addfsub"))
+async def addfsub(message:Message):
+    if not await is_admin(message.from_user.id):return await message.answer("⛔ Admin only.")
+    parts=(message.text or "").split()
+    if len(parts)!=2 or not parts[1].lstrip('-').isdigit():return await message.answer("Usage:\n<code>/addfsub -1001234567890</code>")
+    cid=int(parts[1]);fsubs=await get_fsub_channels()
+    if cid>=0:return await message.answer("❌ Use the full private channel ID.")
+    if len(fsubs)>=4:return await message.answer("❌ Maximum 4 FSub channels allowed.")
+    if any(str(c.get("chat_id"))==str(cid) for c in fsubs):return await message.answer("❌ This channel is already added.")
+    try: chat=await bot.get_chat(cid);me=await bot.get_me();member=await bot.get_chat_member(cid,me.id);status=str(getattr(getattr(member,'status',None),'value',getattr(member,'status',None))).lower()
+    except Exception as e:return await message.answer(f"❌ I can't access this channel.\n\n<code>{str(e)[:500]}</code>")
+    if status not in ("administrator","creator"):return await message.answer("❌ Bot is not admin in this channel.")
+    invite=None
+    try:invite=(await bot.create_chat_invite_link(cid)).invite_link
+    except Exception:
+        if chat.username:invite=f"https://t.me/{chat.username}"
+    if not invite:return await message.answer("❌ Couldn't create an invite link.")
+    fsubs.append({"chat_id":cid,"title":chat.title or "Channel","username":chat.username,"invite_link":invite});await save_fsub_channels(fsubs);await message.answer(f"✅ <b>FSub channel added!</b>\n\n📢 <a href=\"{invite}\">{chat.title or 'Channel'}</a>\n🆔 <code>{cid}</code>")
+
+@router.message(Command("delfsub"))
+async def delfsub(message:Message):
+    if not await is_admin(message.from_user.id):return await message.answer("⛔ Admin only.")
+    uid=user_id_arg(message)
+    if uid is None:return await message.answer("Usage:\n<code>/delfsub CHANNEL_ID</code>")
+    fsubs=await get_fsub_channels();new=[c for c in fsubs if str(c.get('chat_id'))!=str(uid)]
+    if len(new)==len(fsubs):return await message.answer("❌ This channel is not in FSub.")
+    await save_fsub_channels(new);await message.answer("✅ FSub channel removed.")
+
+@router.message(Command("fsub"))
+async def fsub_list(message:Message):
+    if not await is_admin(message.from_user.id):return await message.answer("⛔ Admin only.")
+    fsubs=await get_fsub_channels()
+    if not fsubs:return await message.answer("📢 <b>FSub Channels</b>\n\nNo channels added.")
+    text="📢 <b>FSub Channels</b>\n\n"+"".join(f"{i}. {c.get('title','Channel')}\n   🆔 <code>{c['chat_id']}</code>\n\n" for i,c in enumerate(fsubs,1));await message.answer(text)
+
+@router.callback_query(F.data=="settings_admins")
+async def settings_admins(callback:CallbackQuery):
+    if not await is_admin(callback.from_user.id):
+        return await callback.answer("⛔ Admin only.", show_alert=True)
+
+    await callback.answer()
+
+    data = await admins.find().sort("user_id", 1).to_list(length=None)
+    text = (
+        "👑 <b>Owner</b>\n"
+        f"{profile_link(OWNER_ID, '@Its_Lozo')}\n"
+        f"🆔 <code>{OWNER_ID}</code>\n\n"
+        "🛡 <b>Admins</b>\n"
+    )
+
+    if data:
+        for item in data:
+            uid = item.get("user_id")
+            if not uid:
+                continue
+            name = item.get("name") or await get_user_name(uid)
+            text += f"• {profile_link(uid, name)}\n  🆔 <code>{uid}</code>\n"
+    else:
+        text += "• None\n"
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(
+                text="🔙 Back",
+                callback_data="settings_back"
+            )
+        ]]
+    )
 
     try:
-        # Save the channel message in database
-        file_id = db.add_file(
-            DB_CHANNEL_ID,
-            post.message_id,
-            post.caption or post.text or ""
-        )
-
-        # Create deeplink for this exact message
-        token = db.create_main_link(
-            f"message:{DB_CHANNEL_ID}:{post.message_id}"
-        )
-
-        url = main_link_url(token)
-
-        # Share button
-        markup = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "↗ ꜱʜᴀʀᴇ ᴜʀʟ",
-                    url=share_url(url)
-                )
-            ]
-        ])
-
-        # Put share button below the original DB channel message
+        await callback.message.edit_text(text, reply_markup=keyboard)
+    except Exception as e:
+        log.warning("Settings admins edit failed: %s", e)
         try:
-            await context.bot.edit_message_reply_markup(
-                chat_id=DB_CHANNEL_ID,
-                message_id=post.message_id,
-                reply_markup=markup
-            )
+            await callback.message.edit_caption(caption=text, reply_markup=keyboard)
         except Exception:
-            log.exception("Could not add share button to DB message")
+            pass
 
-    except Exception:
-        log.exception("DB channel indexing failed")
+@router.callback_query(F.data=="settings_mods")
+async def settings_mods(callback:CallbackQuery):
+    if not await is_admin(callback.from_user.id):return await callback.answer("⛔ Admin only.",show_alert=True)
+    data=await mods.find().to_list(length=None);text="🛡 <b>Moderators</b>\n\n"+ ("".join(f"• {profile_link(x['user_id'],x.get('name') or await get_user_name(x['user_id']))}\n  🆔 <code>{x['user_id']}</code>\n" for x in data) if data else "• None")
+    await callback.answer();await callback.message.edit_text(text,reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back",callback_data="settings_back")]]))
 
-def main():
-    threading.Thread(
-        target=start_health_server,
-        daemon=True
-    ).start()
+@router.callback_query(F.data=="settings_back")
+async def settings_back(callback:CallbackQuery):
+    if not await is_admin(callback.from_user.id):return await callback.answer("⛔ Admin only.",show_alert=True)
+    await callback.answer();await callback.message.edit_text("⚙️ <b>Sir, yahan se aap bot ki settings manage kar sakte hain.</b>\n\n<i>Please choose an option below.</i>",reply_markup=settings_keyboard())
 
-    app = Application.builder().token(BOT_TOKEN).build()
-
-    # =========================
-    # GLOBAL BAN GUARD
-    # =========================
-    # Ye sabse pehle chalega.
-    # Banned user ke messages aage process nahi honge.
-    app.add_handler(
-        MessageHandler(filters.ALL, ban_guard),
-        group=-1
+@router.message(Command("clone"))
+async def clone_info(message:Message):
+    if not is_owner(message.from_user.id):return await message.answer("⛔ Owner only.")
+    await message.answer(
+        "🔁 <b>Clone System</b>\n\n"
+        "All clones same MongoDB database use karenge.\n\n"
+        "<b>Clone-wise separate:</b>\n"
+        "• Users\n• Broadcasts & broadcast replies\n• Start Image\n• Force Subscribe\n\n"
+        "<b>Shared across clones:</b>\n"
+        "• Admins\n• Moderators\n• Channel/Post records\n• Batches / Genlinks\n\n"
+        "<b>Compatibility:</b> Purane batch/file links ko intentionally preserve kiya gaya hai, isliye old links continue working rahenge.\n\n"
+        "Same MongoDB + same database use ho sakta hai; BOT_TOKEN se har clone ka unique data namespace banta hai."
     )
 
-    # =========================
-    # COMMAND HANDLERS
-    # =========================
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("genlink", genlink))
-    app.add_handler(CommandHandler("batch", batch))
-    app.add_handler(CommandHandler("settings", settings))
-    app.add_handler(CommandHandler("banuser", banuser))
-    app.add_handler(CommandHandler("unbanuser", unbanuser))
-    app.add_handler(CommandHandler("banuser_list", banuser_list))
-    app.add_handler(CommandHandler("addsubs", addsubs))
-    app.add_handler(CommandHandler("removesubs", removesubs))
-    app.add_handler(CommandHandler("list_premium", list_premium))
-    app.add_handler(CommandHandler("users", users))
-    app.add_handler(CommandHandler("broadcast", broadcast))
-    app.add_handler(CommandHandler("myplan", myplan))
+@router.message(Command("stats"))
+async def stats(message:Message):
+    if not await is_mod(message.from_user.id):return await message.answer("⛔ Moderator/Admin only.")
+    total=await users.count_documents({});active=await users.count_documents({"banned":{"$ne":True}});banned=await users.count_documents({"banned":True})
+    text=(f"📊 <b>BOT STATISTICS</b>\n\n👥 <b>Users</b>\n• Total Users: <b>{total}</b>\n• Active Users: <b>{active}</b>\n• Banned Users: <b>{banned}</b>\n\n🛡 <b>Staff</b>\n• Admins: <b>{await admins.count_documents({})}</b>\n• Moderators: <b>{await mods.count_documents({})}</b>\n\n📦 <b>Storage</b>\n• Saved Posts: <b>{await posts.count_documents({})}</b>\n• Batches/Links: <b>{await batches.count_documents({})}</b>\n\n📢 <b>Force Subscribe</b>\n• Channels: <b>{len(await get_fsub_channels())}</b>/4")
+    await message.answer(text)
 
-    # =========================
-    # CALLBACK HANDLER
-    # =========================
-    app.add_handler(
-        CallbackQueryHandler(callback)
-    )
+async def broadcast_delete_worker():
+    log.info("Broadcast auto-delete worker started.")
+    while True:
+        try:
+            expired=await broadcasts.find({"type":"broadcast_delivery","delete_at":{"$lte":now()},"deleted":{"$ne":True}}).to_list(length=100)
+            for item in expired:
+                uid=item.get("user_id");mid=item.get("broadcast_message_id")
+                if uid and mid:
+                    try:await bot.delete_message(uid,mid)
+                    except Exception:pass
+                await broadcasts.update_one({"_id":item["_id"]},{"$set":{"deleted":True,"deleted_at":now()}})
+        except Exception as e:log.warning("Broadcast delete worker error: %s",e)
+        await asyncio.sleep(30)
 
-    # =========================
-    # SETTINGS INPUT
-    # =========================
-    app.add_handler(
-        MessageHandler(
-            filters.PHOTO | (filters.TEXT & ~filters.COMMAND),
-            settings_input
-        ),
-        group=1
-    )
+@router.errors()
+async def error_handler(event):
+    log.exception("Telegram handler error: %s",event.exception)
 
-    # =========================
-    # DB CHANNEL INDEXER
-    # =========================
-    app.add_handler(
-        MessageHandler(
-            filters.ALL,
-            channel_post_indexer
-        ),
-        group=10
-    )
+async def ensure_indexes():
+    """Create only safe non-unique indexes; existing duplicate data cannot break startup."""
+    specs = [
+        (users, [("user_id", 1)]),
+        (users, [("banned", 1)]),
+        (admins, [("user_id", 1)]),
+        (mods, [("user_id", 1)]),
+        (posts, [("chat_id", 1), ("message_id", 1)]),
+        (posts, [("chat_id", 1), ("message_id", 1), ("file_unique_id", 1)]),
+        (batches, [("_id", 1)]),
+        (broadcasts, [("type", 1), ("user_id", 1), ("broadcast_message_id", 1)]),
+        (broadcasts, [("type", 1), ("delete_at", 1), ("deleted", 1)]),
+        (broadcasts, [("type", 1), ("interface_chat_id", 1), ("interface_message_id", 1), ("status", 1)]),
+    ]
+    async def create(collection, keys):
+        try:
+            await collection.create_index(keys)
+        except Exception as e:
+            log.warning("Index creation skipped for %s: %s", collection.name, e)
+    await asyncio.gather(*(create(c, k) for c, k in specs))
 
-    log.info("Bot starting")
+async def main():
+    global BOT_USERNAME
+    await ensure_indexes()
+    try:
+        me=await bot.get_me();BOT_USERNAME=me.username or BOT_USERNAME;log.info("Bot started as @%s",BOT_USERNAME)
+    except Exception as e:log.warning("Could not get bot info: %s",e)
+    try:
+        await migrate_legacy_users_once()
+    except Exception as e:
+        log.warning("Startup user migration failed: %s", e)
+    await bot.delete_webhook(drop_pending_updates=False)
+    server=uvicorn.Server(uvicorn.Config(app,host="0.0.0.0",port=PORT,log_level="info"))
+    worker=asyncio.create_task(broadcast_delete_worker())
+    try:await asyncio.gather(dp.start_polling(bot),server.serve())
+    finally:
+        worker.cancel()
+        try:await worker
+        except asyncio.CancelledError:pass
+        await bot.session.close()
+        mongo.close()
 
-    app.run_polling(
-        allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=True,
-        close_loop=False
-    )
-
-
-if __name__ == "__main__":
-    main()
+if __name__=="__main__":asyncio.run(main())

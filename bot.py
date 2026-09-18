@@ -570,11 +570,10 @@ async def broadcast(message: Message):
         "session_id": session_id, "owner_user_id": message.from_user.id,
         "interface_chat_id": interface.chat.id, "interface_message_id": interface.message_id,
         "source_chat_id": source.chat.id, "source_message_id": source.message_id,
-        "reply_markup": source.reply_markup.model_dump() if source.reply_markup else None,
         "delete_seconds": delete_seconds, "created_at": now(), "status": "pending",
     })
 
-async def copy_broadcast_message(uid: int, source_chat_id: int, source_message_id: int, reply_markup=None):
+async def copy_broadcast_message(uid: int, source_chat_id: int, source_message_id: int):
     """Copy with FloodWait retry. copy_message keeps the broadcast clean and
     works for text, media, stickers, animations, etc."""
     for attempt in range(3):
@@ -583,7 +582,6 @@ async def copy_broadcast_message(uid: int, source_chat_id: int, source_message_i
                 chat_id=uid,
                 from_chat_id=source_chat_id,
                 message_id=source_message_id,
-                reply_markup=InlineKeyboardMarkup.model_validate(reply_markup) if reply_markup else None,
             )
         except TelegramRetryAfter as e:
             wait = int(getattr(e, "retry_after", 1)) + 1
@@ -594,7 +592,7 @@ async def copy_broadcast_message(uid: int, source_chat_id: int, source_message_i
     raise RuntimeError("Telegram FloodWait did not clear after retries")
 
 
-async def execute_broadcast(source_chat_id: int, source_message_id: int, delete_seconds: int, reply_markup=None):
+async def execute_broadcast(source_chat_id: int, source_message_id: int, delete_seconds: int):
     # Import the old audience only once for a fresh clone.
     await migrate_legacy_users_once()
     recipients = await users.find(
@@ -617,7 +615,7 @@ async def execute_broadcast(source_chat_id: int, source_message_id: int, delete_
     async def send_one(uid):
         async with semaphore:
             try:
-                copied = await copy_broadcast_message(uid, source_chat_id, source_message_id, reply_markup)
+                copied = await copy_broadcast_message(uid, source_chat_id, source_message_id)
                 return ("ok", uid, copied.message_id, None)
             except Exception as e:
                 err = str(e).lower()
@@ -708,7 +706,7 @@ async def broadcast_confirm(callback: CallbackQuery):
     try: await callback.message.edit_text("📢 <b>BROADCAST STARTED</b>\n\n⏳ Sending message to users...\nPlease wait...")
     except Exception: pass
     try:
-        result=await execute_broadcast(session["source_chat_id"],session["source_message_id"],delete_seconds,session.get("reply_markup"))
+        result=await execute_broadcast(session["source_chat_id"],session["source_message_id"],delete_seconds)
         report=("📢 <u><b>BROADCAST COMPLETED!</b></u>\n\n📊 <b>Stats Report:</b>\n"
                 f"• Total Users DB: <b>{result['total_users']}</b>\n• Successful: <b>{result['successful']}</b>\n"
                 f"• Blocked Users Wiped: <b>{result['blocked_wiped']}</b>\n• Deleted Accounts Wiped: <b>{result['deleted_wiped']}</b>\n"

@@ -2291,8 +2291,15 @@ async def broadcast(update, context):
 
     if delete_after:
 
-        async def delete_broadcast_job(ctx):
-        for uid, mid in sent:
+        async def delete_broadcast_job(context):
+    for uid, mid in sent:
+        try:
+            await context.bot.delete_message(
+                chat_id=uid,
+                message_id=mid
+            )
+        except Exception:
+            pass
     async def broadcast(update, context):
     if not admin_ok(update.effective_user.id):
         return await update.message.reply_text("❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ.")

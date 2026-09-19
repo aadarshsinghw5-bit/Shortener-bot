@@ -2292,11 +2292,11 @@ async def broadcast(update, context):
     if delete_after:
 
         async def delete_broadcast_job(context):
-    for uid, mid in sent:
+    for uid, message_id in sent_messages:
         try:
             await context.bot.delete_message(
                 chat_id=uid,
-                message_id=mid
+                message_id=message_id
             )
         except Exception:
             pass

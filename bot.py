@@ -2291,7 +2291,7 @@ async def broadcast(update, context):
 
     if delete_after:
 
-    async def delete_broadcast_job(context):
+        async def delete_broadcast_job(context):
         for uid, message_id in sent_messages:
             try:
                 await context.bot.delete_message(

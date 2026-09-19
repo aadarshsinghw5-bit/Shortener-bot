@@ -2,229 +2,150 @@ import os
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from supabase import create_client
+from pymongo import MongoClient, ASCENDING
+from pymongo.collection import ReturnDocument
 
 
 class Database:
     def __init__(self):
-        self.db = create_client(
-            os.environ["SUPABASE_URL"],
-            os.environ["SUPABASE_KEY"]
-        )
+        uri = os.environ.get("MONGO_URI", "").strip()
+        if not uri:
+            raise RuntimeError("MONGO_URI is not configured")
+
+        self.client = MongoClient(uri, serverSelectionTimeoutMS=10000)
+        db_name = os.environ.get("MONGO_DB", "file_store_bot").strip() or "file_store_bot"
+        self.db = self.client[db_name]
+
+        self.users = self.db["users"]
+        self.banned_users = self.db["banned_users"]
+        self.admins = self.db["admins"]
+        self.premium = self.db["premium"]
+        self.settings = self.db["settings"]
+        self.files = self.db["files"]
+        self.batches = self.db["batches"]
+        self.batch_items = self.db["batch_items"]
+        self.main_links = self.db["main_links"]
+        self.tokens = self.db["tokens"]
+        self.fsub_channels = self.db["fsub_channels"]
+        self.broadcasts = self.db["broadcasts"]
+
+        self.users.create_index([("user_id", ASCENDING)], unique=True)
+        self.admins.create_index([("user_id", ASCENDING)], unique=True)
+        self.banned_users.create_index([("user_id", ASCENDING)], unique=True)
+        self.premium.create_index([("user_id", ASCENDING)], unique=True)
+        self.settings.create_index([("key", ASCENDING)], unique=True)
+        self.files.create_index([("file_id", ASCENDING)], unique=True)
+        self.files.create_index([("channel_id", ASCENDING), ("message_id", ASCENDING)], unique=True)
+        self.batches.create_index([("batch_id", ASCENDING)], unique=True)
+        self.batch_items.create_index([("batch_id", ASCENDING), ("position", ASCENDING)], unique=True)
+        self.main_links.create_index([("token", ASCENDING)], unique=True)
+        self.tokens.create_index([("token", ASCENDING)], unique=True)
+        self.fsub_channels.create_index([("channel_id", ASCENDING)], unique=True)
+        self.broadcasts.create_index([("broadcast_id", ASCENDING)], unique=True)
+
+    @staticmethod
+    def _dt(value):
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
 
     def add_user(self, user_id, username="", first_name=""):
-        self.db.table("users").upsert({
-            "user_id": int(user_id),
-            "username": username or "",
-            "first_name": first_name or ""
-        }).execute()
+        self.users.update_one(
+            {"user_id": int(user_id)},
+            {"$set": {"username": username or "", "first_name": first_name or ""},
+             "$setOnInsert": {"created_at": datetime.now(timezone.utc)}},
+            upsert=True,
+        )
 
     def list_users(self):
-        r = (
-            self.db.table("users")
-            .select("*")
-            .order("created_at")
-            .execute()
-        )
-        return r.data or []
+        return list(self.users.find({}, {"_id": 0}).sort("created_at", ASCENDING))
 
     # =========================
     # BAN SYSTEM
     # =========================
-
     def is_banned(self, user_id):
-        r = (
-            self.db.table("banned_users")
-            .select("user_id")
-            .eq("user_id", int(user_id))
-            .limit(1)
-            .execute()
-        )
-        return bool(r.data)
+        return self.banned_users.find_one({"user_id": int(user_id)}, {"_id": 1}) is not None
 
     def ban_user(self, user_id):
-        self.db.table("banned_users").upsert({
-            "user_id": int(user_id)
-        }).execute()
+        self.banned_users.update_one({"user_id": int(user_id)}, {"$set": {"user_id": int(user_id)}}, upsert=True)
 
     def unban_user(self, user_id):
-        self.db.table("banned_users").delete().eq(
-            "user_id",
-            int(user_id)
-        ).execute()
+        self.banned_users.delete_one({"user_id": int(user_id)})
 
     def list_banned_users(self):
-        r = (
-            self.db.table("banned_users")
-            .select("user_id")
-            .order("user_id")
-            .execute()
-        )
-        return r.data or []
+        return list(self.banned_users.find({}, {"_id": 0, "user_id": 1}).sort("user_id", ASCENDING))
 
     # =========================
     # ADMIN SYSTEM
     # =========================
-
     def add_admin(self, user_id):
         user_id = int(user_id)
-
-        # admins references users,
-        # so ensure the target exists first.
         self.add_user(user_id)
-
-        self.db.table("admins").upsert({
-            "user_id": user_id
-        }).execute()
+        self.admins.update_one({"user_id": user_id}, {"$set": {"user_id": user_id}}, upsert=True)
 
     def delete_user(self, user_id):
-        self.db.table("users").delete().eq(
-            "user_id",
-            int(user_id)
-        ).execute()
+        self.users.delete_one({"user_id": int(user_id)})
 
     def remove_admin(self, user_id):
-        self.db.table("admins").delete().eq(
-            "user_id",
-            int(user_id)
-        ).execute()
+        self.admins.delete_one({"user_id": int(user_id)})
 
     def is_admin(self, user_id):
-        r = (
-            self.db.table("admins")
-            .select("user_id")
-            .eq("user_id", int(user_id))
-            .limit(1)
-            .execute()
-        )
-        return bool(r.data)
+        return self.admins.find_one({"user_id": int(user_id)}, {"_id": 1}) is not None
 
     def list_admins(self):
-        r = (
-            self.db.table("admins")
-            .select("user_id")
-            .order("user_id")
-            .execute()
-        )
-
         out = []
-
-        for row in r.data or []:
+        for row in self.admins.find({}, {"_id": 0}).sort("user_id", ASCENDING):
             uid = int(row["user_id"])
-
-            u = (
-                self.db.table("users")
-                .select("username,first_name")
-                .eq("user_id", uid)
-                .limit(1)
-                .execute()
-            )
-
-            info = u.data[0] if u.data else {}
-
-            out.append({
-                "user_id": uid,
-                "username": info.get("username", ""),
-                "first_name": info.get("first_name", "")
-            })
-
+            info = self.users.find_one({"user_id": uid}, {"_id": 0, "username": 1, "first_name": 1}) or {}
+            out.append({"user_id": uid, "username": info.get("username", ""), "first_name": info.get("first_name", "")})
         return out
 
     # =========================
     # PREMIUM SYSTEM
     # =========================
-
     def add_premium(self, user_id, days):
         user_id = int(user_id)
         now = datetime.now(timezone.utc)
-
         old = self.get_premium(user_id)
-
         base = now
-
         if old:
             try:
-                old_expiry = datetime.fromisoformat(
-                    old["expires_at"].replace("Z", "+00:00")
-                )
-
-                if old_expiry.tzinfo is None:
-                    old_expiry = old_expiry.replace(
-                        tzinfo=timezone.utc
-                    )
-
-                base = max(now, old_expiry)
-
+                base = max(now, self._dt(old["expires_at"]))
             except Exception:
                 pass
-
         start = now
         expiry = base + timedelta(days=int(days))
-
-        self.db.table("premium").upsert({
-            "user_id": user_id,
-            "starts_at": start.isoformat(),
-            "expires_at": expiry.isoformat()
-        }).execute()
-
+        self.premium.update_one(
+            {"user_id": user_id},
+            {"$set": {"starts_at": start, "expires_at": expiry}},
+            upsert=True,
+        )
         return start, expiry
 
     def remove_premium(self, user_id):
         old = self.get_premium(user_id)
-
-        self.db.table("premium").delete().eq(
-            "user_id",
-            int(user_id)
-        ).execute()
-
+        self.premium.delete_one({"user_id": int(user_id)})
         return old
 
     def get_premium(self, user_id):
-        r = (
-            self.db.table("premium")
-            .select("*")
-            .eq("user_id", int(user_id))
-            .limit(1)
-            .execute()
-        )
-
-        if not r.data:
+        row = self.premium.find_one({"user_id": int(user_id)}, {"_id": 0})
+        if not row:
             return None
-
-        row = r.data[0]
-
         try:
-            expiry = datetime.fromisoformat(
-                row["expires_at"].replace("Z", "+00:00")
-            )
-
-            if expiry.tzinfo is None:
-                expiry = expiry.replace(
-                    tzinfo=timezone.utc
-                )
-
+            expiry = self._dt(row["expires_at"])
             if expiry <= datetime.now(timezone.utc):
-                self.db.table("premium").delete().eq(
-                    "user_id",
-                    int(user_id)
-                ).execute()
-
+                self.premium.delete_one({"user_id": int(user_id)})
                 return None
-
         except Exception:
             return None
-
         return row
 
     def list_premium(self):
-        r = (
-            self.db.table("premium")
-            .select("*")
-            .order("expires_at")
-            .execute()
-        )
-
-        return r.data or []
+        return list(self.premium.find({}, {"_id": 0}).sort("expires_at", ASCENDING))
 
     def is_premium(self, user_id):
         return self.get_premium(user_id) is not None
@@ -232,266 +153,117 @@ class Database:
     # =========================
     # SETTINGS
     # =========================
-
     def set_setting(self, key, value):
-        self.db.table("settings").upsert({
-            "key": key,
-            "value": str(value)
-        }).execute()
+        self.settings.update_one({"key": key}, {"$set": {"value": str(value)}}, upsert=True)
 
     def get_setting(self, key, default=None):
-        r = (
-            self.db.table("settings")
-            .select("value")
-            .eq("key", key)
-            .limit(1)
-            .execute()
-        )
-
-        return r.data[0]["value"] if r.data else default
+        row = self.settings.find_one({"key": key}, {"_id": 0, "value": 1})
+        return row.get("value", default) if row else default
 
     # =========================
     # FILE SYSTEM
     # =========================
-
     def add_file(self, channel_id, message_id, caption=""):
-        existing = (
-            self.db.table("files")
-            .select("file_id")
-            .eq("channel_id", int(channel_id))
-            .eq("message_id", int(message_id))
-            .limit(1)
-            .execute()
-        )
-
-        if existing.data:
-            return existing.data[0]["file_id"]
-
+        existing = self.files.find_one({"channel_id": int(channel_id), "message_id": int(message_id)}, {"_id": 0, "file_id": 1})
+        if existing:
+            return existing["file_id"]
         file_id = uuid.uuid4().hex[:12]
-
-        self.db.table("files").insert({
-            "file_id": file_id,
-            "channel_id": int(channel_id),
-            "message_id": int(message_id),
-            "caption": caption or ""
-        }).execute()
-
+        try:
+            self.files.insert_one({"file_id": file_id, "channel_id": int(channel_id), "message_id": int(message_id), "caption": caption or ""})
+        except Exception:
+            existing = self.files.find_one({"channel_id": int(channel_id), "message_id": int(message_id)}, {"_id": 0, "file_id": 1})
+            if existing:
+                return existing["file_id"]
+            raise
         return file_id
 
     def get_file(self, file_id):
-        r = (
-            self.db.table("files")
-            .select("*")
-            .eq("file_id", file_id)
-            .limit(1)
-            .execute()
-        )
+        return self.files.find_one({"file_id": file_id}, {"_id": 0})
 
-        return r.data[0] if r.data else None
-
-    def list_files_between(
-        self,
-        channel_id,
-        first_message_id,
-        last_message_id
-    ):
-        r = (
-            self.db.table("files")
-            .select("*")
-            .eq("channel_id", int(channel_id))
-            .gte("message_id", int(first_message_id))
-            .lte("message_id", int(last_message_id))
-            .order("message_id")
-            .execute()
-        )
-
-        return r.data or []
+    def list_files_between(self, channel_id, first_message_id, last_message_id):
+        return list(self.files.find(
+            {"channel_id": int(channel_id), "message_id": {"$gte": int(first_message_id), "$lte": int(last_message_id)}},
+            {"_id": 0},
+        ).sort("message_id", ASCENDING))
 
     # =========================
     # BATCH SYSTEM
     # =========================
-
     def create_batch(self, file_ids):
         batch_id = uuid.uuid4().hex[:12]
-
-        self.db.table("batches").insert({
-            "batch_id": batch_id,
-            "created_at": datetime.now(timezone.utc).isoformat()
-        }).execute()
-
-        rows = [
-            {
-                "batch_id": batch_id,
-                "file_id": fid,
-                "position": pos
-            }
-            for pos, fid in enumerate(file_ids)
-        ]
-
+        self.batches.insert_one({"batch_id": batch_id, "created_at": datetime.now(timezone.utc)})
+        rows = [{"batch_id": batch_id, "file_id": fid, "position": pos} for pos, fid in enumerate(file_ids)]
         if rows:
-            self.db.table("batch_items").insert(rows).execute()
-
+            self.batch_items.insert_many(rows)
         return batch_id
 
     def get_batch_items(self, batch_id):
-        r = (
-            self.db.table("batch_items")
-            .select("file_id,position")
-            .eq("batch_id", batch_id)
-            .order("position")
-            .execute()
-        )
-
         result = []
-
-        for item in r.data or []:
+        for item in self.batch_items.find({"batch_id": batch_id}, {"_id": 0}).sort("position", ASCENDING):
             row = self.get_file(item["file_id"])
-
             if row:
                 result.append(row)
-
         return result
 
     # =========================
     # MAIN LINKS
     # =========================
-
     def create_main_link(self, target):
         token = uuid.uuid4().hex
-
-        self.db.table("main_links").insert({
-            "token": token,
-            "target": target
-        }).execute()
-
+        self.main_links.insert_one({"token": token, "target": target})
         return token
 
     def get_main_link(self, token):
-        r = (
-            self.db.table("main_links")
-            .select("*")
-            .eq("token", token)
-            .limit(1)
-            .execute()
-        )
-
-        return r.data[0] if r.data else None
+        return self.main_links.find_one({"token": token}, {"_id": 0})
 
     # =========================
     # TOKEN SYSTEM
     # =========================
-
     def create_token(self, user_id, target, hours=2):
         token = uuid.uuid4().hex
-
-        expires = (
-            datetime.now(timezone.utc)
-            + timedelta(hours=hours)
-        )
-
-        self.db.table("tokens").insert({
-            "token": token,
-            "user_id": int(user_id),
-            "target": target,
-            "expires_at": expires.isoformat(),
-            "used": False
-        }).execute()
-
+        expires = datetime.now(timezone.utc) + timedelta(hours=hours)
+        self.tokens.insert_one({"token": token, "user_id": int(user_id), "target": target, "expires_at": expires, "used": False})
         return token
 
     def get_token(self, token):
-        r = (
-            self.db.table("tokens")
-            .select("*")
-            .eq("token", token)
-            .limit(1)
-            .execute()
-        )
-
-        return r.data[0] if r.data else None
+        return self.tokens.find_one({"token": token}, {"_id": 0})
 
     def consume_token(self, token, user_id):
         row = self.get_token(token)
-
-        if (
-            not row
-            or row.get("used")
-            or int(row["user_id"]) != int(user_id)
-        ):
+        if not row or row.get("used") or int(row.get("user_id", -1)) != int(user_id):
             return None
-
         try:
-            expiry = datetime.fromisoformat(
-                row["expires_at"].replace("Z", "+00:00")
-            )
-
-            if expiry.tzinfo is None:
-                expiry = expiry.replace(
-                    tzinfo=timezone.utc
-                )
-
-            if expiry <= datetime.now(timezone.utc):
+            if self._dt(row["expires_at"]) <= datetime.now(timezone.utc):
                 return None
-
         except Exception:
             return None
-
-        updated = (
-            self.db.table("tokens")
-            .update({"used": True})
-            .eq("token", token)
-            .eq("user_id", int(user_id))
-            .eq("used", False)
-            .execute()
+        result = self.tokens.find_one_and_update(
+            {"token": token, "user_id": int(user_id), "used": False},
+            {"$set": {"used": True, "used_at": datetime.now(timezone.utc)}},
+            return_document=ReturnDocument.AFTER,
         )
-
-        if not updated.data:
-            return None
-
-        return row["target"]
+        return row["target"] if result else None
 
     # =========================
     # FORCE SUBSCRIPTION
     # =========================
-
     def add_fsub(self, channel_id, invite_link="", title=""):
-        self.db.table("fsub_channels").upsert({
-            "channel_id": str(channel_id),
-            "invite_link": invite_link or "",
-            "title": title or str(channel_id)
-        }).execute()
-
-    def del_fsub(self, channel_id):
-        self.db.table("fsub_channels").delete().eq(
-            "channel_id",
-            str(channel_id)
-        ).execute()
-
-    def list_fsub(self):
-        r = (
-            self.db.table("fsub_channels")
-            .select("*")
-            .order("title")
-            .execute()
+        self.fsub_channels.update_one(
+            {"channel_id": str(channel_id)},
+            {"$set": {"invite_link": invite_link or "", "title": title or str(channel_id)}},
+            upsert=True,
         )
 
-        return r.data or []
+    def del_fsub(self, channel_id):
+        self.fsub_channels.delete_one({"channel_id": str(channel_id)})
+
+    def list_fsub(self):
+        return list(self.fsub_channels.find({}, {"_id": 0}).sort("title", ASCENDING))
 
     # =========================
     # BROADCAST
     # =========================
-
     def create_broadcast(self, message_id, delete_at=None):
         bid = uuid.uuid4().hex[:12]
-
-        self.db.table("broadcasts").insert({
-            "broadcast_id": bid,
-            "message_id": int(message_id),
-            "delete_at": (
-                delete_at.isoformat()
-                if delete_at
-                else None
-            )
-        }).execute()
-
+        self.broadcasts.insert_one({"broadcast_id": bid, "message_id": int(message_id), "delete_at": delete_at})
         return bid

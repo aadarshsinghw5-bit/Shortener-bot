@@ -1048,7 +1048,7 @@ async def broadcast(update,context):
     for r in rows:
         uid=int(r["user_id"])
         try:
-            m=await context.bot.copy_message(chat_id=uid,from_chat_id=replied.chat_id,message_id=replied.message_id,reply_markup=replied.reply_markup);success+=1;sent.append((uid,m.message_id))
+            m=await context.bot.copy_message(uid,replied.chat_id,replied.message_id);success+=1;sent.append((uid,m.message_id))
         except Exception as e:
             if "blocked" in str(e).lower() or "chat not found" in str(e).lower():
                 blocked+=1

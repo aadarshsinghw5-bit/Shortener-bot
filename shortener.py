@@ -18,7 +18,6 @@ class Shortener:
         return (
             f"{self.gateway_url}/api/gateway?"
             + urlencode({
-                "token": token,
-                "bot": bot_username.lstrip("@"),
+                "token": token
             })
         )

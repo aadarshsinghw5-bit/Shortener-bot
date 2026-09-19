@@ -2294,49 +2294,123 @@ async def broadcast(update, context):
         async def delete_broadcast_job(ctx):
 
             for uid, mid in sent:
+async def broadcast(update, context):
+    if not admin_ok(update.effective_user.id):
+        return await update.message.reply_text("❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ.")
+
+    replied = update.message.reply_to_message
+
+    if not replied:
+        return await update.message.reply_text(
+            "ʀᴇᴘʟʏ ᴛᴏ ᴛʜᴇ ᴍᴇꜱꜱᴀɢᴇ ʏᴏᴜ ᴡᴀɴᴛ ᴛᴏ ʙʀᴏᴀᴅᴄᴀꜱᴛ.\n\n"
+            "/broadcast\n"
+            "/broadcast 24h"
+        )
+
+    arg = context.args[0].lower() if context.args else ""
+
+    delete_after = None
+    mode = "BROADCAST"
+    lifespan = "Permanent"
+
+    if arg.endswith("h"):
+        try:
+            hours = int(arg[:-1])
+
+            if hours > 0:
+                delete_after = datetime.now(timezone.utc) + timedelta(hours=hours)
+                mode = "PBROADCAST"
+                lifespan = arg
+
+        except (ValueError, TypeError):
+            pass
+
+    rows = db.list_users()
+
+    total = len(rows)
+    success = 0
+    blocked = 0
+    failed = 0
+
+    sent_messages = []
+
+    # Preserve buttons from the original message
+    original_markup = replied.reply_markup
+
+    for r in rows:
+        try:
+            uid = int(r["user_id"])
+
+            copied = await context.bot.copy_message(
+                chat_id=uid,
+                from_chat_id=replied.chat_id,
+                message_id=replied.message_id,
+                reply_markup=original_markup
+            )
+
+            success += 1
+            sent_messages.append((uid, copied.message_id))
+
+        except Exception as e:
+            error_text = str(e).lower()
+
+            if "blocked" in error_text or "chat not found" in error_text:
+                blocked += 1
 
                 try:
-
-                    await ctx.bot.delete_message(
-                        chat_id=uid,
-                        message_id=mid
-                    )
-
+                    db.delete_user(uid)
                 except Exception:
                     pass
 
+            else:
+                failed += 1
+
+    # Schedule deletion ONLY for the broadcast copies
+    if delete_after and sent_messages:
+
         delay = (
-            delete_after
-            - datetime.now(timezone.utc)
+            delete_after - datetime.now(timezone.utc)
         ).total_seconds()
+
+        async def delete_broadcast_job(context):
+            for uid, message_id in sent_messages:
+                try:
+                    await context.bot.delete_message(
+                        chat_id=uid,
+                        message_id=message_id
+                    )
+                except Exception:
+                    pass
 
         context.job_queue.run_once(
             delete_broadcast_job,
             max(1, delay)
         )
 
-    # =====================================================
-    # BROADCAST REPORT
-    # =====================================================
-
+    # Completion statistics
     stats = (
-        f"📢 <b>BROADCAST COMPLETED!</b>\n\n"
-        f"📊 <b>Stats Report:</b>\n"
+        "📢 <b>BROADCAST COMPLETED!</b>\n\n"
+        "📊 <b>Stats Report:</b>\n"
         f"• Total Users DB: {total}\n"
         f"• Successful: {success}\n"
         f"• Blocked Users Wiped: {blocked}\n"
-        f"• Deleted Accounts Wiped: 0\n"
+        "• Deleted Accounts Wiped: 0\n"
         f"• Unsuccessful/Failed: {failed}\n\n"
         f"⚙️ Config Mode: {mode}\n"
         f"⏱ Task Lifespan: {lifespan}"
     )
 
-    await update.message.reply_text(
-        stats,
-        parse_mode="HTML"
-    )
-
-
+    # IMPORTANT:
+    # This message is sent to the admin and is NOT included
+    # in the scheduled deletion list.
+    try:
+        await update.message.reply_text(
+            stats,
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Failed to send broadcast stats: {e}")
+        
 # =========================================================
 # DB CHANNEL INDEXER
 # =========================================================

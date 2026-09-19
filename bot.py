@@ -2296,9 +2296,6 @@ async def broadcast(update, context):
     async def broadcast(update, context):
     if not admin_ok(update.effective_user.id):
         return await update.message.reply_text("❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ.")
-
-    replied = update.message.reply_to_message
-
 async def broadcast(update, context):
     if not admin_ok(update.effective_user.id):
         return await update.message.reply_text("❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ.")
@@ -2343,6 +2340,8 @@ async def broadcast(update, context):
     original_markup = replied.reply_markup
 
     for r in rows:
+        uid = None
+
         try:
             uid = int(r["user_id"])
 
@@ -2362,17 +2361,16 @@ async def broadcast(update, context):
             if "blocked" in error_text or "chat not found" in error_text:
                 blocked += 1
 
-                try:
-                    db.delete_user(uid)
-                except Exception:
-                    pass
-
+                if uid is not None:
+                    try:
+                        db.delete_user(uid)
+                    except Exception:
+                        pass
             else:
                 failed += 1
 
     # Schedule deletion ONLY for the broadcast copies
     if delete_after and sent_messages:
-
         delay = (
             delete_after - datetime.now(timezone.utc)
         ).total_seconds()
@@ -2405,9 +2403,7 @@ async def broadcast(update, context):
         f"⏱ Task Lifespan: {lifespan}"
     )
 
-    # IMPORTANT:
-    # This message is sent to the admin and is NOT included
-    # in the scheduled deletion list.
+    # This message is NOT included in scheduled deletion
     try:
         await update.message.reply_text(
             stats,

@@ -776,13 +776,8 @@ async def myplan(update, context):
 )
 
     try:
-        start = datetime.fromisoformat(
-            plan["starts_at"].replace("Z", "+00:00")
-        )
-
-        expiry = datetime.fromisoformat(
-            plan["expires_at"].replace("Z", "+00:00")
-        )
+        start = db._dt(plan["starts_at"])
+expiry = db._dt(plan["expires_at"])
 
         if start.tzinfo is None:
             start = start.replace(tzinfo=timezone.utc)
@@ -1177,6 +1172,14 @@ def main():
 
     app.run_polling(
         allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True,
+        close_loop=False
+    )
+
+
+if __name__ == "__main__":
+    main()
+pdates=Update.ALL_TYPES,
         drop_pending_updates=True,
         close_loop=False
     )

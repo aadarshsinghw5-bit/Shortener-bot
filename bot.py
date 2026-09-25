@@ -1161,7 +1161,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-pdates=Update.ALL_TYPES,
-        drop_pending_updates=True,
-        close_loop=False
-    )

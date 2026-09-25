@@ -775,69 +775,50 @@ async def myplan(update, context):
     link_preview_options=LinkPreviewOptions(is_disabled=True)
 )
 
-    try:
+        try:
         start = db._dt(plan["starts_at"])
-expiry = db._dt(plan["expires_at"])
-
-        if start.tzinfo is None:
-            start = start.replace(tzinfo=timezone.utc)
-
-        if expiry.tzinfo is None:
-            expiry = expiry.replace(tzinfo=timezone.utc)
-
+        expiry = db._dt(plan["expires_at"])
         now = datetime.now(timezone.utc)
-        remaining = expiry - now
 
-        total_seconds = max(0, int(remaining.total_seconds()))
+        if expiry <= now:
+            return await update.message.reply_text(
+                "💎 <b>ᴍʏ ᴘʟᴀɴ</b>\n\n"
+                "🔴 ꜱᴛᴀᴛᴜꜱ: ᴘʀᴇᴍɪᴜᴍ ᴇxᴘɪʀᴇᴅ\n\n"
+                "⚡ ꜱʜᴏʀᴛᴇɴᴇʀ ʙʏᴘᴀꜱꜱ: ᴅɪꜱᴀʙʟᴇᴅ",
+                parse_mode="HTML",
+                link_preview_options=LinkPreviewOptions(is_disabled=True)
+            )
+
+        remaining = expiry - now
+        total_seconds = int(remaining.total_seconds())
 
         days = total_seconds // 86400
         hours = (total_seconds % 86400) // 3600
         minutes = (total_seconds % 3600) // 60
 
-        start_text = start.astimezone(IST).strftime(
-            "%d-%m-%Y %I:%M:%S %p"
-        )
-
-        expiry_text = expiry.astimezone(IST).strftime(
-            "%d-%m-%Y %I:%M:%S %p"
-        )
-
-        if total_seconds <= 0:
-            return await update.message.reply_text(
-                "💎 <b>ᴍʏ ᴘʟᴀɴ</b>\n\n"
-                "🔴 ꜱᴛᴀᴛᴜꜱ: ᴘʀᴇᴍɪᴜᴍ ᴇxᴘɪʀᴇᴅ\n\n"
-                "⚡ ꜱʜᴏʀᴛᴇɴᴇʀ ʙʏᴘᴀꜱꜱ: ᴅɪꜱᴀʙʟᴇᴅ",
-                parse_mode="HTML"
-            )
-
         remaining_text = (
-            f"{days} ᴅᴀʏꜱ, {hours} ʜᴏᴜʀꜱ, {minutes} ᴍɪɴᴜᴛᴇꜱ"
-        )
-
-        text = (
-            "💎 <b>ᴍʏ ᴘʟᴀɴ</b>\n\n"
-            "🟢 ꜱᴛᴀᴛᴜꜱ: ᴘʀᴇᴍɪᴜᴍ ᴀᴄᴛɪᴠᴇ\n\n"
-            f"📅 ᴀᴄᴛɪᴠᴀᴛᴇᴅ ᴏɴ:\n"
-            f"<code>{start_text} IST</code>\n\n"
-            f"⏳ ᴇxᴘɪʀᴇꜱ ᴏɴ:\n"
-            f"<code>{expiry_text} IST</code>\n\n"
-            f"📆 ᴛɪᴍᴇ ʀᴇᴍᴀɪɴɪɴɢ:\n"
-            f"<code>{remaining_text}</code>\n\n"
-            "⚡ ꜱʜᴏʀᴛᴇɴᴇʀ ʙʏᴘᴀꜱꜱ: ᴇɴᴀʙʟᴇᴅ\n\n"
-            "ᴛʜᴀɴᴋ ʏᴏᴜ ꜰᴏʀ ᴜꜱɪɴɢ ᴏᴜʀ ꜱᴇʀᴠɪᴄᴇ ❤️"
+            f"{days}d {hours}h {minutes}m"
+            if days > 0
+            else f"{hours}h {minutes}m"
         )
 
         return await update.message.reply_text(
-            text,
-            parse_mode="HTML"
+            "💎 <b>ᴍʏ ᴘʟᴀɴ</b>\n\n"
+            "🟢 ꜱᴛᴀᴛᴜꜱ: ᴘʀᴇᴍɪᴜᴍ ᴀᴄᴛɪᴠᴇ\n\n"
+            f"📅 ᴀᴄᴛɪᴠᴀᴛᴇᴅ ᴏɴ: <code>{start.strftime('%d-%m-%Y %I:%M:%S %p')}</code>\n"
+            f"⏳ ᴇxᴘɪʀᴇs ᴏɴ: <code>{expiry.strftime('%d-%m-%Y %I:%M:%S %p')}</code>\n"
+            f"⏱ ᴛɪᴍᴇ ʀᴇᴍᴀɪɴɪɴɢ: <b>{remaining_text}</b>\n\n"
+            "⚡ ꜱʜᴏʀᴛᴇɴᴇʀ ʙʏᴘᴀꜱꜱ: 🟢 ᴇɴᴀʙʟᴇᴅ\n\n"
+            "💎 ᴛʜᴀɴᴋ ʏᴏᴜ ꜰᴏʀ ᴜsɪɴɢ ᴘʀᴇᴍɪᴜᴍ!",
+            parse_mode="HTML",
+            link_preview_options=LinkPreviewOptions(is_disabled=True)
         )
 
     except Exception:
         log.exception("Myplan failed")
-
         return await update.message.reply_text(
             "❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ʟᴏᴀᴅ ʏᴏᴜʀ ᴘʟᴀɴ ᴅᴇᴛᴀɪʟꜱ."
-    )
+        )
         
 async def list_premium(update,context):
     if not admin_ok(update.effective_user.id):return await update.message.reply_text("❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ.")

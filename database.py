@@ -56,8 +56,27 @@ class Database:
     def add_user(self, user_id, username="", first_name=""):
         self.users.update_one(
             {"user_id": int(user_id)},
-            {"$set": {"username": username or "", "first_name": first_name or ""},
-             "$setOnInsert": {"created_at": datetime.now(timezone.utc)}},
+            {
+                "$set": {"username": username or "", "first_name": first_name or ""},
+                "$setOnInsert": {
+                    "created_at": datetime.now(timezone.utc),
+                    "timezone": "Asia/Kolkata",
+                },
+            },
+            upsert=True,
+        )
+
+    def get_user_timezone(self, user_id):
+        row = self.users.find_one(
+            {"user_id": int(user_id)},
+            {"_id": 0, "timezone": 1},
+        )
+        return (row or {}).get("timezone") or "Asia/Kolkata"
+
+    def set_user_timezone(self, user_id, timezone_name):
+        self.users.update_one(
+            {"user_id": int(user_id)},
+            {"$set": {"timezone": timezone_name}},
             upsert=True,
         )
 
@@ -71,13 +90,19 @@ class Database:
         return self.banned_users.find_one({"user_id": int(user_id)}, {"_id": 1}) is not None
 
     def ban_user(self, user_id):
-        self.banned_users.update_one({"user_id": int(user_id)}, {"$set": {"user_id": int(user_id)}}, upsert=True)
+        self.banned_users.update_one(
+            {"user_id": int(user_id)},
+            {"$set": {"user_id": int(user_id)}},
+            upsert=True,
+        )
 
     def unban_user(self, user_id):
         self.banned_users.delete_one({"user_id": int(user_id)})
 
     def list_banned_users(self):
-        return list(self.banned_users.find({}, {"_id": 0, "user_id": 1}).sort("user_id", ASCENDING))
+        return list(
+            self.banned_users.find({}, {"_id": 0, "user_id": 1}).sort("user_id", ASCENDING)
+        )
 
     # =========================
     # ADMIN SYSTEM
@@ -85,7 +110,11 @@ class Database:
     def add_admin(self, user_id):
         user_id = int(user_id)
         self.add_user(user_id)
-        self.admins.update_one({"user_id": user_id}, {"$set": {"user_id": user_id}}, upsert=True)
+        self.admins.update_one(
+            {"user_id": user_id},
+            {"$set": {"user_id": user_id}},
+            upsert=True,
+        )
 
     def delete_user(self, user_id):
         self.users.delete_one({"user_id": int(user_id)})
@@ -100,8 +129,17 @@ class Database:
         out = []
         for row in self.admins.find({}, {"_id": 0}).sort("user_id", ASCENDING):
             uid = int(row["user_id"])
-            info = self.users.find_one({"user_id": uid}, {"_id": 0, "username": 1, "first_name": 1}) or {}
-            out.append({"user_id": uid, "username": info.get("username", ""), "first_name": info.get("first_name", "")})
+            info = self.users.find_one(
+                {"user_id": uid},
+                {"_id": 0, "username": 1, "first_name": 1},
+            ) or {}
+            out.append(
+                {
+                    "user_id": uid,
+                    "username": info.get("username", ""),
+                    "first_name": info.get("first_name", ""),
+                }
+            )
         return out
 
     # =========================
@@ -154,7 +192,11 @@ class Database:
     # SETTINGS
     # =========================
     def set_setting(self, key, value):
-        self.settings.update_one({"key": key}, {"$set": {"value": str(value)}}, upsert=True)
+        self.settings.update_one(
+            {"key": key},
+            {"$set": {"value": str(value)}},
+            upsert=True,
+        )
 
     def get_setting(self, key, default=None):
         row = self.settings.find_one({"key": key}, {"_id": 0, "value": 1})
@@ -164,14 +206,28 @@ class Database:
     # FILE SYSTEM
     # =========================
     def add_file(self, channel_id, message_id, caption=""):
-        existing = self.files.find_one({"channel_id": int(channel_id), "message_id": int(message_id)}, {"_id": 0, "file_id": 1})
+        existing = self.files.find_one(
+            {"channel_id": int(channel_id), "message_id": int(message_id)},
+            {"_id": 0, "file_id": 1},
+        )
         if existing:
             return existing["file_id"]
+
         file_id = uuid.uuid4().hex[:12]
         try:
-            self.files.insert_one({"file_id": file_id, "channel_id": int(channel_id), "message_id": int(message_id), "caption": caption or ""})
+            self.files.insert_one(
+                {
+                    "file_id": file_id,
+                    "channel_id": int(channel_id),
+                    "message_id": int(message_id),
+                    "caption": caption or "",
+                }
+            )
         except Exception:
-            existing = self.files.find_one({"channel_id": int(channel_id), "message_id": int(message_id)}, {"_id": 0, "file_id": 1})
+            existing = self.files.find_one(
+                {"channel_id": int(channel_id), "message_id": int(message_id)},
+                {"_id": 0, "file_id": 1},
+            )
             if existing:
                 return existing["file_id"]
             raise
@@ -181,25 +237,40 @@ class Database:
         return self.files.find_one({"file_id": file_id}, {"_id": 0})
 
     def list_files_between(self, channel_id, first_message_id, last_message_id):
-        return list(self.files.find(
-            {"channel_id": int(channel_id), "message_id": {"$gte": int(first_message_id), "$lte": int(last_message_id)}},
-            {"_id": 0},
-        ).sort("message_id", ASCENDING))
+        return list(
+            self.files.find(
+                {
+                    "channel_id": int(channel_id),
+                    "message_id": {
+                        "$gte": int(first_message_id),
+                        "$lte": int(last_message_id),
+                    },
+                },
+                {"_id": 0},
+            ).sort("message_id", ASCENDING)
+        )
 
     # =========================
     # BATCH SYSTEM
     # =========================
     def create_batch(self, file_ids):
         batch_id = uuid.uuid4().hex[:12]
-        self.batches.insert_one({"batch_id": batch_id, "created_at": datetime.now(timezone.utc)})
-        rows = [{"batch_id": batch_id, "file_id": fid, "position": pos} for pos, fid in enumerate(file_ids)]
+        self.batches.insert_one(
+            {"batch_id": batch_id, "created_at": datetime.now(timezone.utc)}
+        )
+        rows = [
+            {"batch_id": batch_id, "file_id": fid, "position": pos}
+            for pos, fid in enumerate(file_ids)
+        ]
         if rows:
             self.batch_items.insert_many(rows)
         return batch_id
 
     def get_batch_items(self, batch_id):
         result = []
-        for item in self.batch_items.find({"batch_id": batch_id}, {"_id": 0}).sort("position", ASCENDING):
+        for item in self.batch_items.find(
+            {"batch_id": batch_id}, {"_id": 0}
+        ).sort("position", ASCENDING):
             row = self.get_file(item["file_id"])
             if row:
                 result.append(row)
@@ -222,7 +293,15 @@ class Database:
     def create_token(self, user_id, target, hours=2):
         token = uuid.uuid4().hex
         expires = datetime.now(timezone.utc) + timedelta(hours=hours)
-        self.tokens.insert_one({"token": token, "user_id": int(user_id), "target": target, "expires_at": expires, "used": False})
+        self.tokens.insert_one(
+            {
+                "token": token,
+                "user_id": int(user_id),
+                "target": target,
+                "expires_at": expires,
+                "used": False,
+            }
+        )
         return token
 
     def get_token(self, token):
@@ -230,16 +309,30 @@ class Database:
 
     def consume_token(self, token, user_id):
         row = self.get_token(token)
-        if not row or row.get("used") or int(row.get("user_id", -1)) != int(user_id):
+        if (
+            not row
+            or row.get("used")
+            or int(row.get("user_id", -1)) != int(user_id)
+        ):
             return None
         try:
             if self._dt(row["expires_at"]) <= datetime.now(timezone.utc):
                 return None
         except Exception:
             return None
+
         result = self.tokens.find_one_and_update(
-            {"token": token, "user_id": int(user_id), "used": False},
-            {"$set": {"used": True, "used_at": datetime.now(timezone.utc)}},
+            {
+                "token": token,
+                "user_id": int(user_id),
+                "used": False,
+            },
+            {
+                "$set": {
+                    "used": True,
+                    "used_at": datetime.now(timezone.utc),
+                }
+            },
             return_document=ReturnDocument.AFTER,
         )
         return row["target"] if result else None
@@ -250,7 +343,12 @@ class Database:
     def add_fsub(self, channel_id, invite_link="", title=""):
         self.fsub_channels.update_one(
             {"channel_id": str(channel_id)},
-            {"$set": {"invite_link": invite_link or "", "title": title or str(channel_id)}},
+            {
+                "$set": {
+                    "invite_link": invite_link or "",
+                    "title": title or str(channel_id),
+                }
+            },
             upsert=True,
         )
 
@@ -265,5 +363,11 @@ class Database:
     # =========================
     def create_broadcast(self, message_id, delete_at=None):
         bid = uuid.uuid4().hex[:12]
-        self.broadcasts.insert_one({"broadcast_id": bid, "message_id": int(message_id), "delete_at": delete_at})
+        self.broadcasts.insert_one(
+            {
+                "broadcast_id": bid,
+                "message_id": int(message_id),
+                "delete_at": delete_at,
+            }
+        )
         return bid

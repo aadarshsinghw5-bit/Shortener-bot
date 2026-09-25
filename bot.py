@@ -775,7 +775,7 @@ async def myplan(update, context):
     link_preview_options=LinkPreviewOptions(is_disabled=True)
 )
 
-        try:
+    try:
         start = db._dt(plan["starts_at"])
         expiry = db._dt(plan["expires_at"])
         now = datetime.now(timezone.utc)

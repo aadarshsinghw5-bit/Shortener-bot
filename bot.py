@@ -827,7 +827,8 @@ async def list_premium(update,context):
     lines=["<b>💎 ᴘʀᴇᴍɪᴜᴍ ꜱᴜʙꜱᴄʀɪʙᴇʀꜱ</b>",""]
     for i,r in enumerate(rows,1):
         uid=int(r["user_id"]);u=next((x for x in db.list_users() if int(x["user_id"])==uid),{})
-        def fmt(v):return datetime.fromisoformat(v.replace("Z","+00:00")).astimezone(IST).strftime("%d-%m-%Y %I:%M:%S %p")
+        def fmt(v):
+    return db._dt(v).astimezone(IST).strftime("%d-%m-%Y %I:%M:%S %p")
         lines.append(f"<b>#{i}</b>\n👤 <a href=\"tg://user?id={uid}\">{u.get('first_name') or 'User'}</a>\n🔹 Username: @{u.get('username')}\n🆔 User ID: <code>{uid}</code>\n🟢 Start: <code>{fmt(r.get('starts_at',r['expires_at']))} IST</code>\n🔴 End: <code>{fmt(r['expires_at'])} IST</code>\n")
     text="\n".join(lines)
     for pos in range(0,len(text),3900): await update.message.reply_text(text[pos:pos+3900],parse_mode="HTML",disable_web_page_preview=True)
@@ -1164,7 +1165,3 @@ pdates=Update.ALL_TYPES,
         drop_pending_updates=True,
         close_loop=False
     )
-
-
-if __name__ == "__main__":
-    main()

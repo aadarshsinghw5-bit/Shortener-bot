@@ -6,8 +6,10 @@ from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import quote
+from html import escape
 
 from dotenv import load_dotenv
+
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -15,7 +17,9 @@ from telegram import (
     InputMediaPhoto,
     LinkPreviewOptions,
 )
+
 from telegram.constants import ChatMemberStatus
+
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -41,22 +45,54 @@ logging.basicConfig(
     level=logging.INFO,
 )
 
-log = logging.getLogger("file-store-bot")
+log = logging.getLogger(
+    "file-store-bot"
+)
 
-for name in ("httpx", "httpcore", "telegram", "telegram.ext"):
-    logging.getLogger(name).setLevel(logging.WARNING)
+for name in (
+    "httpx",
+    "httpcore",
+    "telegram",
+    "telegram.ext",
+):
+    logging.getLogger(
+        name
+    ).setLevel(
+        logging.WARNING
+    )
 
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-BOT_USERNAME = os.environ["BOT_USERNAME"].lstrip("@")
-OWNER_ID = int(os.environ["OWNER_ID"])
-DB_CHANNEL_ID = int(os.environ["DB_CHANNEL_ID"])
 
-IST = ZoneInfo("Asia/Kolkata")
+BOT_USERNAME = os.environ[
+    "BOT_USERNAME"
+].lstrip("@")
+
+OWNER_ID = int(
+    os.environ["OWNER_ID"]
+)
+
+DB_CHANNEL_ID = int(
+    os.environ["DB_CHANNEL_ID"]
+)
+
+IST = ZoneInfo(
+    "Asia/Kolkata"
+)
+
+
+# =========================================================
+# ANTI-BYPASS
+# =========================================================
+
+BYPASS_MIN_SECONDS = 90
 
 
 db = Database()
-shortener = Shortener(db)
+
+shortener = Shortener(
+    db
+)
 
 
 # =========================================================
@@ -64,8 +100,11 @@ shortener = Shortener(db)
 # =========================================================
 
 _pending_image = set()
+
 _pending_autodelete = set()
+
 _pending_admin = set()
+
 _pending_fsub = set()
 
 
@@ -73,30 +112,68 @@ _pending_fsub = set()
 # HEALTH SERVER
 # =========================================================
 
-class HealthHandler(BaseHTTPRequestHandler):
+class HealthHandler(
+    BaseHTTPRequestHandler
+):
 
     def do_GET(self):
         self.send_response(200)
-        self.send_header("Content-Type", "application/json")
+
+        self.send_header(
+            "Content-Type",
+            "application/json",
+        )
+
         self.end_headers()
+
         self.wfile.write(
             b'{"ok":true,"service":"telegram-file-store-bot"}'
         )
 
     def do_HEAD(self):
         self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", "49")
+
+        self.send_header(
+            "Content-Type",
+            "application/json",
+        )
+
+        self.send_header(
+            "Content-Length",
+            "49",
+        )
+
         self.end_headers()
 
-    def log_message(self, format, *args):
+    def log_message(
+        self,
+        format,
+        *args,
+    ):
         pass
 
 
 def start_health_server():
-    port = int(os.environ.get("PORT", "10000"))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    log.info("Health server running on port %s", port)
+    port = int(
+        os.environ.get(
+            "PORT",
+            "10000",
+        )
+    )
+
+    server = HTTPServer(
+        (
+            "0.0.0.0",
+            port,
+        ),
+        HealthHandler,
+    )
+
+    log.info(
+        "Health server running on port %s",
+        port,
+    )
+
     server.serve_forever()
 
 
@@ -104,21 +181,27 @@ def start_health_server():
 # BAN GUARD
 # =========================================================
 
-async def ban_guard(update, context):
+async def ban_guard(
+    update,
+    context,
+):
     user = update.effective_user
 
-    # Channel posts aur bina user wale updates ignore
     if not user:
         return
 
-    # Owner ko ban guard se exempt rakho
     if user.id == OWNER_ID:
         return
 
     try:
-        banned = db.is_banned(user.id)
+        banned = db.is_banned(
+            user.id
+        )
+
     except Exception:
-        log.exception("Ban check failed")
+        log.exception(
+            "Ban check failed"
+        )
         return
 
     if not banned:
@@ -140,16 +223,22 @@ async def ban_guard(update, context):
 # =========================================================
 
 def start_image():
-    return db.get_setting("start_image", "")
+    return db.get_setting(
+        "start_image",
+        "",
+    )
 
 
 def start_caption():
     return (
         "<i>ʜɪ ᴛʜᴇʀᴇ....! 💥</i>\n\n"
         "ɪ ᴀᴍ ᴀ ꜰɪʟᴇ-ꜱᴛᴏʀᴇ ʙᴏᴛ.\n"
-        "ɪ ᴄᴀɴ ɢᴇɴᴇʀᴀᴛᴇ ʟɪɴᴋꜱ ᴅɪʀᴇᴄᴛʟʏ ᴡɪᴛʜ ɴᴏ ᴘʀᴏʙʟᴇᴍꜱ.\n\n"
+        "ɪ ᴄᴀɴ ɢᴇɴᴇʀᴀᴛᴇ ʟɪɴᴋꜱ "
+        "ᴅɪʀᴇᴄᴛʟʏ ᴡɪᴛʜ ɴᴏ ᴘʀᴏʙʟᴇᴍꜱ.\n\n"
         '<b>ᴍʏ ᴏᴡɴᴇʀ:</b> '
-        '<a href="https://t.me/Its_Lozo">@ɪᴛꜱ_ʟᴏᴢᴏ</a>'
+        '<a href="https://t.me/Its_Lozo">'
+        "@ɪᴛꜱ_ʟᴏᴢᴏ"
+        "</a>"
     )
 
 
@@ -157,12 +246,18 @@ def about_caption():
     return (
         "<b>ᴀʙᴏᴜᴛ ᴜꜱ..</b>\n\n"
         '➤ ᴍᴀᴅᴇ ꜰᴏʀ : '
-        '<a href="https://t.me/Anime_Hub_94">ᴀɴɪᴍᴇ ʜᴜʙ</a>\n'
+        '<a href="https://t.me/Anime_Hub_94">'
+        "ᴀɴɪᴍᴇ ʜᴜʙ"
+        "</a>\n"
         '➤ ᴏᴡɴᴇʀ : '
-        '<a href="https://t.me/Its_Lozo">@ɪᴛꜱ_ʟᴏᴢᴏ</a>\n'
+        '<a href="https://t.me/Its_Lozo">'
+        "@ɪᴛꜱ_ʟᴏᴢᴏ"
+        "</a>\n"
         '➤ ᴅᴇᴠᴇʟᴏᴘᴇʀ : '
-        '<a href="https://t.me/Its_Lozo">@ɪᴛꜱ_ʟᴏᴢᴏ</a>\n\n'
-        "ᴀᴅɪᴏꜱ !!"
+        '<a href="https://t.me/Its_Lozo">'
+        "@ɪᴛꜱ_ʟᴏᴢᴏ"
+        "</a>\n\n"
+        "ᴀᴅɪᴏs !!"
     )
 
 
@@ -170,8 +265,14 @@ def start_keyboard():
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("ᴀʙᴏᴜᴛ", callback_data="about"),
-                InlineKeyboardButton("ᴄʟᴏꜱᴇ", callback_data="close"),
+                InlineKeyboardButton(
+                    "ᴀʙᴏᴜᴛ",
+                    callback_data="about",
+                ),
+                InlineKeyboardButton(
+                    "ᴄʟᴏꜱᴇ",
+                    callback_data="close",
+                ),
             ]
         ]
     )
@@ -181,14 +282,22 @@ def about_keyboard():
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("ʙᴀᴄᴋ", callback_data="back"),
-                InlineKeyboardButton("ᴄʟᴏꜱᴇ", callback_data="close"),
+                InlineKeyboardButton(
+                    "ʙᴀᴄᴋ",
+                    callback_data="back",
+                ),
+                InlineKeyboardButton(
+                    "ᴄʟᴏꜱᴇ",
+                    callback_data="close",
+                ),
             ]
         ]
     )
 
 
-async def render_start(message):
+async def render_start(
+    message,
+):
     image = start_image()
 
     if image:
@@ -200,7 +309,9 @@ async def render_start(message):
                 reply_markup=start_keyboard(),
             )
         except Exception:
-            log.exception("Could not send start image")
+            log.exception(
+                "Could not send start image"
+            )
 
     await message.reply_text(
         start_caption(),
@@ -231,6 +342,7 @@ async def edit_start(q):
             parse_mode="HTML",
             reply_markup=start_keyboard(),
         )
+
     except Exception:
         pass
 
@@ -242,6 +354,7 @@ async def edit_about(q):
             parse_mode="HTML",
             reply_markup=about_keyboard(),
         )
+
     except Exception:
         try:
             await q.edit_message_text(
@@ -249,6 +362,7 @@ async def edit_about(q):
                 parse_mode="HTML",
                 reply_markup=about_keyboard(),
             )
+
         except Exception:
             pass
 
@@ -257,7 +371,10 @@ async def edit_about(q):
 # FORCE SUB
 # =========================================================
 
-async def is_fsub_member(bot, user_id):
+async def is_fsub_member(
+    bot,
+    user_id,
+):
     missing = []
 
     for row in db.list_fsub():
@@ -287,7 +404,10 @@ def fsub_keyboard(rows):
             buttons.append(
                 [
                     InlineKeyboardButton(
-                        f"ᴊᴏɪɴ {row.get('title') or 'ᴄʜᴀɴɴᴇʟ'}",
+                        (
+                            f"ᴊᴏɪɴ "
+                            f"{row.get('title') or 'ᴄʜᴀɴɴᴇʟ'}"
+                        ),
                         url=row["invite_link"],
                     )
                 ]
@@ -302,7 +422,9 @@ def fsub_keyboard(rows):
         ]
     )
 
-    return InlineKeyboardMarkup(buttons)
+    return InlineKeyboardMarkup(
+        buttons
+    )
 
 
 # =========================================================
@@ -310,15 +432,24 @@ def fsub_keyboard(rows):
 # =========================================================
 
 def main_link_url(token):
-    return f"https://t.me/{BOT_USERNAME}?start=link_{token}"
+    return (
+        f"https://t.me/{BOT_USERNAME}"
+        f"?start=link_{token}"
+    )
 
 
 def share_url(url):
-    return f"https://t.me/share/url?url={quote(url, safe='')}"
+    return (
+        "https://t.me/share/url?"
+        f"url={quote(url, safe='')}"
+    )
 
 
 def admin_ok(uid):
-    return uid == OWNER_ID or db.is_admin(uid)
+    return (
+        uid == OWNER_ID
+        or db.is_admin(uid)
+    )
 
 
 # =========================================================
@@ -359,10 +490,16 @@ def settings_keyboard():
 
 
 def settings_text():
-    return "<b>⚙️ ꜱᴇᴛᴛɪɴɢꜱ</b>\n\nᴄʜᴏᴏꜱᴇ ᴀɴ ᴏᴘᴛɪᴏɴ."
+    return (
+        "<b>⚙️ ꜱᴇᴛᴛɪɴɢꜱ</b>\n\n"
+        "ᴄʜᴏᴏꜱᴇ ᴀɴ ᴏᴘᴛɪᴏɴ."
+    )
 
 
-async def settings(update, context):
+async def settings(
+    update,
+    context,
+):
     uid = update.effective_user.id
 
     if not admin_ok(uid):
@@ -381,17 +518,25 @@ async def settings(update, context):
 # GENLINK
 # =========================================================
 
-async def genlink(update, context):
-    if not admin_ok(update.effective_user.id):
+async def genlink(
+    update,
+    context,
+):
+    if not admin_ok(
+        update.effective_user.id
+    ):
         return await update.message.reply_text(
             "❌ ʏᴏᴜ ᴀʀᴇ ɴᴏᴛ ᴀᴜᴛʜᴏʀɪᴢᴇᴅ."
         )
 
-    replied = update.message.reply_to_message
+    replied = (
+        update.message.reply_to_message
+    )
 
     if not replied:
         return await update.message.reply_text(
-            "ʀᴇᴘʟʏ ᴛᴏ ᴀɴʏ ᴍᴇꜱꜱᴀɢᴇ ᴀɴᴅ ᴜꜱᴇ /ɢᴇɴʟɪɴᴋ."
+            "ʀᴇᴘʟʏ ᴛᴏ ᴀɴʏ ᴍᴇꜱꜱᴀɢᴇ "
+            "ᴀɴᴅ ᴜꜱᴇ /ɢᴇɴʟɪɴᴋ."
         )
 
     try:
@@ -401,19 +546,33 @@ async def genlink(update, context):
             message_id=replied.message_id,
         )
 
-        file_id = db.add_file(
+        db.add_file(
             DB_CHANNEL_ID,
             copied.message_id,
-            getattr(replied, "caption", None)
-            or getattr(replied, "text", None)
+            getattr(
+                replied,
+                "caption",
+                None,
+            )
+            or getattr(
+                replied,
+                "text",
+                None,
+            )
             or "",
         )
 
         main = db.create_main_link(
-            f"message:{DB_CHANNEL_ID}:{copied.message_id}"
+            (
+                f"message:"
+                f"{DB_CHANNEL_ID}:"
+                f"{copied.message_id}"
+            )
         )
 
-        url = main_link_url(main)
+        url = main_link_url(
+            main
+        )
 
         markup = InlineKeyboardMarkup(
             [
@@ -436,14 +595,20 @@ async def genlink(update, context):
             pass
 
         await update.message.reply_text(
-            f"✅ <b>ɢᴇɴʟɪɴᴋ ɢᴇɴᴇʀᴀᴛᴇᴅ</b>\n\n{url}",
+            (
+                "✅ <b>ɢᴇɴʟɪɴᴋ ɢᴇɴᴇʀᴀᴛᴇᴅ</b>\n\n"
+                f"{url}"
+            ),
             parse_mode="HTML",
             disable_web_page_preview=True,
             reply_markup=markup,
         )
 
     except Exception:
-        log.exception("Genlink failed")
+        log.exception(
+            "Genlink failed"
+        )
+
         await update.message.reply_text(
             "❌ ɢᴇɴʟɪɴᴋ ɢᴇɴᴇʀᴀᴛᴇ ɴᴀʜɪ ʜᴜᴀ."
         )
@@ -460,7 +625,15 @@ def parse_message_link(link):
     )
 
     if match:
-        return int("-100" + match.group(1)), int(match.group(2))
+        return (
+            int(
+                "-100"
+                + match.group(1)
+            ),
+            int(
+                match.group(2)
+            ),
+        )
 
     match = re.fullmatch(
         r"https?://t\.me/([^/]+)/(\d+)",
@@ -468,13 +641,23 @@ def parse_message_link(link):
     )
 
     if match:
-        return match.group(1), int(match.group(2))
+        return (
+            match.group(1),
+            int(
+                match.group(2)
+            ),
+        )
 
     return None
 
 
-async def batch(update, context):
-    if not admin_ok(update.effective_user.id):
+async def batch(
+    update,
+    context,
+):
+    if not admin_ok(
+        update.effective_user.id
+    ):
         return await update.message.reply_text(
             "❌ ʏᴏᴜ ᴀʀᴇ ɴᴏᴛ ᴀᴜᴛʜᴏʀɪᴢᴇᴅ."
         )
@@ -482,11 +665,17 @@ async def batch(update, context):
     if len(context.args) != 2:
         return await update.message.reply_text(
             "ᴜꜱᴀɢᴇ:\n"
-            "/ʙᴀᴛᴄʜ <ꜰɪʀꜱᴛ ᴅʙ ʟɪɴᴋ> <ʟᴀꜱᴛ ᴅʙ ʟɪɴᴋ>"
+            "/ʙᴀᴛᴄʜ <ꜰɪʀꜱᴛ ᴅʙ ʟɪɴᴋ> "
+            "<ʟᴀꜱᴛ ᴅʙ ʟɪɴᴋ>"
         )
 
-    first = parse_message_link(context.args[0])
-    last = parse_message_link(context.args[1])
+    first = parse_message_link(
+        context.args[0]
+    )
+
+    last = parse_message_link(
+        context.args[1]
+    )
 
     if not first or not last:
         return await update.message.reply_text(
@@ -495,28 +684,52 @@ async def batch(update, context):
 
     try:
         fc = (
-            (await context.bot.get_chat(first[0])).id
-            if isinstance(first[0], str)
+            (
+                await context.bot.get_chat(
+                    first[0]
+                )
+            ).id
+            if isinstance(
+                first[0],
+                str,
+            )
             else first[0]
         )
 
         lc = (
-            (await context.bot.get_chat(last[0])).id
-            if isinstance(last[0], str)
+            (
+                await context.bot.get_chat(
+                    last[0]
+                )
+            ).id
+            if isinstance(
+                last[0],
+                str,
+            )
             else last[0]
         )
 
     except Exception:
         return await update.message.reply_text(
-            "❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ʀᴇꜱᴏʟᴠᴇ ᴛʜᴇ ᴅʙ ᴄʜᴀɴɴᴇʟ."
+            "❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ʀᴇꜱᴏʟᴠᴇ "
+            "ᴛʜᴇ ᴅʙ ᴄʜᴀɴɴᴇʟ."
         )
 
-    if fc != DB_CHANNEL_ID or lc != DB_CHANNEL_ID:
+    if (
+        fc != DB_CHANNEL_ID
+        or lc != DB_CHANNEL_ID
+    ):
         return await update.message.reply_text(
-            "❌ ʙᴏᴛʜ ʟɪɴᴋꜱ ᴍᴜꜱᴛ ʙᴇ ꜰʀᴏᴍ ᴛʜᴇ ᴅʙ ᴄʜᴀɴɴᴇʟ."
+            "❌ ʙᴏᴛʜ ʟɪɴᴋꜱ ᴍᴜꜱᴛ ʙᴇ "
+            "ꜰʀᴏᴍ ᴛʜᴇ ᴅʙ ᴄʜᴀɴɴᴇʟ."
         )
 
-    lo, hi = sorted((first[1], last[1]))
+    lo, hi = sorted(
+        (
+            first[1],
+            last[1],
+        )
+    )
 
     rows = db.list_files_between(
         DB_CHANNEL_ID,
@@ -526,18 +739,24 @@ async def batch(update, context):
 
     if not rows:
         return await update.message.reply_text(
-            "❌ ɴᴏ ᴅʙ ᴘᴏꜱᴛꜱ ꜰᴏᴜɴᴅ ɪɴ ᴛʜɪꜱ ʀᴀɴɢᴇ."
+            "❌ ɴᴏ ᴅʙ ᴘᴏꜱᴛꜱ ꜰᴏᴜɴᴅ "
+            "ɪɴ ᴛʜɪꜱ ʀᴀɴɢᴇ."
         )
 
     bid = db.create_batch(
-        [r["file_id"] for r in rows]
+        [
+            r["file_id"]
+            for r in rows
+        ]
     )
 
     main = db.create_main_link(
         f"batch:{bid}"
     )
 
-    url = main_link_url(main)
+    url = main_link_url(
+        main
+    )
 
     markup = InlineKeyboardMarkup(
         [
@@ -558,9 +777,11 @@ async def batch(update, context):
     )
 
     await update.message.reply_text(
-        f"✅ <b>ʙᴀᴛᴄʜ ʟɪɴᴋ ɢᴇɴᴇʀᴀᴛᴇᴅ</b>\n\n"
-        f"ɪᴛᴇᴍꜱ: <b>{len(rows)}</b>\n\n"
-        f"{url}",
+        (
+            "✅ <b>ʙᴀᴛᴄʜ ʟɪɴᴋ ɢᴇɴᴇʀᴀᴛᴇᴅ</b>\n\n"
+            f"ɪᴛᴇᴍꜱ: <b>{len(rows)}</b>\n\n"
+            f"{url}"
+        ),
         parse_mode="HTML",
         disable_web_page_preview=True,
         reply_markup=markup,
@@ -571,13 +792,20 @@ async def batch(update, context):
 # DOWNLOAD PAGE
 # =========================================================
 
-async def send_download_page(message, short_url):
+async def send_download_page(
+    message,
+    short_url,
+):
     caption = (
         "<i>📊 ʜᴇʏ ʙʀᴏ/ꜱɪꜱ,</i>\n\n"
-        "➜ ʏᴏᴜʀ ʟɪɴᴋ ɪꜱ ʀᴇᴀᴅʏ, ᴋɪɴᴅʟʏ ᴄʟɪᴄᴋ ᴏɴ\n"
+        "➜ ʏᴏᴜʀ ʟɪɴᴋ ɪꜱ ʀᴇᴀᴅʏ, "
+        "ᴋɪɴᴅʟʏ ᴄʟɪᴄᴋ ᴏɴ\n"
         "ᴅᴏᴡɴʟᴏᴀᴅ ʙᴜᴛᴛᴏɴ! 👇\n\n"
-        "ᴛᴏ ʙᴜʏ ᴘʀᴇᴍɪᴜᴍ, ᴄᴏɴᴛᴀᴄᴛ: "
-        '<a href="https://t.me/Its_Lozo">@ɪᴛꜱ_ʟᴏᴢᴏ</a>'
+        "ᴛᴏ ʙᴜʏ ᴘʀᴇᴍɪᴜᴍ, "
+        "ᴄᴏɴᴛᴀᴄᴛ: "
+        '<a href="https://t.me/Its_Lozo">'
+        "@ɪᴛꜱ_ʟᴏᴢᴏ"
+        "</a>"
     )
 
     kb = InlineKeyboardMarkup(
@@ -625,13 +853,25 @@ async def send_download_page(message, short_url):
 # DELIVERY
 # =========================================================
 
-async def deliver_target(update, target):
+async def deliver_target(
+    update,
+    target,
+):
     ids = []
-    bot = update.get_bot()
-    chat_id = update.effective_chat.id
 
-    if target.startswith("message:"):
-        _, cid, mid = target.split(":", 2)
+    bot = update.get_bot()
+
+    chat_id = (
+        update.effective_chat.id
+    )
+
+    if target.startswith(
+        "message:"
+    ):
+        _, cid, mid = target.split(
+            ":",
+            2,
+        )
 
         message = await bot.copy_message(
             chat_id=chat_id,
@@ -639,11 +879,21 @@ async def deliver_target(update, target):
             message_id=int(mid),
         )
 
-        ids.append(message.message_id)
+        ids.append(
+            message.message_id
+        )
 
-    elif target.startswith("batch:"):
-        bid = target.split(":", 1)[1]
-        rows = db.get_batch_items(bid)
+    elif target.startswith(
+        "batch:"
+    ):
+        bid = target.split(
+            ":",
+            1,
+        )[1]
+
+        rows = db.get_batch_items(
+            bid
+        )
 
         if not rows:
             return []
@@ -652,27 +902,40 @@ async def deliver_target(update, target):
             try:
                 message = await bot.copy_message(
                     chat_id=chat_id,
-                    from_chat_id=int(row["channel_id"]),
-                    message_id=int(row["message_id"]),
+                    from_chat_id=int(
+                        row["channel_id"]
+                    ),
+                    message_id=int(
+                        row["message_id"]
+                    ),
                 )
 
-                ids.append(message.message_id)
+                ids.append(
+                    message.message_id
+                )
 
             except Exception:
-                log.exception("Batch delivery failed")
+                log.exception(
+                    "Batch delivery failed"
+                )
 
     return ids
 
 
-async def delete_delivered(context):
+async def delete_delivered(
+    context,
+):
     data = context.job.data
 
-    for mid in data["message_ids"]:
+    for mid in data[
+        "message_ids"
+    ]:
         try:
             await context.bot.delete_message(
                 data["chat_id"],
                 mid,
             )
+
         except Exception:
             pass
 
@@ -688,12 +951,20 @@ def auto_delete_minutes():
                 )
             ),
         )
+
     except Exception:
         return 10
 
 
-async def deliver_and_notify(update, context, target):
-    ids = await deliver_target(update, target)
+async def deliver_and_notify(
+    update,
+    context,
+    target,
+):
+    ids = await deliver_target(
+        update,
+        target,
+    )
 
     if not ids:
         return
@@ -704,37 +975,77 @@ async def deliver_and_notify(update, context, target):
         msg = await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=(
-                f"ᴛʜɪꜱ ꜰɪʟᴇ ɪꜱ ᴅᴇʟᴇᴛɪɴɢ ᴀᴜᴛᴏᴍᴀᴛɪᴄᴀʟʟʏ ɪɴ "
+                f"ᴛʜɪs ꜰɪʟᴇ ɪs ᴅᴇʟᴇᴛɪɴɢ "
+                f"ᴀᴜᴛᴏᴍᴀᴛɪᴄᴀʟʟʏ ɪɴ "
                 f"{mins} ᴍɪɴᴜᴛᴇꜱ.\n\n"
-                "ꜰᴏʀᴡᴀʀᴅ ɪᴛ ᴛᴏ ʏᴏᴜʀ ꜱᴀᴠᴇᴅ ᴍᴇꜱꜱᴀɢᴇꜱ..!"
+                "ꜰᴏʀᴡᴀʀᴅ ɪᴛ ᴛᴏ ʏᴏᴜʀ "
+                "ꜱᴀᴠᴇᴅ ᴍᴇꜱꜱᴀɢᴇꜱ..!"
             ),
         )
 
-        ids.append(msg.message_id)
+        ids.append(
+            msg.message_id
+        )
 
         context.job_queue.run_once(
             delete_delivered,
             mins * 60,
             data={
-                "chat_id": update.effective_chat.id,
+                "chat_id": (
+                    update.effective_chat.id
+                ),
                 "message_ids": ids,
             },
         )
 
 
 # =========================================================
+# BYPASS MESSAGE
+# =========================================================
+
+def bypass_message():
+    return (
+        "<b>🚫 ʙʏᴘᴀss ᴅᴇᴛᴇᴄᴛᴇᴅ</b>\n\n"
+        "ʏᴏᴜ ʜᴀᴠᴇ ʙᴇᴇɴ ᴅᴇᴛᴇᴄᴛᴇᴅ ᴜsɪɴɢ ᴀ ʙʏᴘᴀss "
+        "ᴛᴏ sᴋɪᴘ ᴛʜᴇ ʀᴇǫᴜɪʀᴇᴅ ᴠᴇʀɪғɪᴄᴀᴛɪᴏɴ ᴛɪᴍᴇ.\n\n"
+        "ᴀs ᴀ ʀᴇsᴜʟᴛ, ʏᴏᴜʀ ᴀᴄᴄᴇss ᴛᴏ ᴛʜɪs ʙᴏᴛ "
+        "ʜᴀs ʙᴇᴇɴ <b>ᴘᴇʀᴍᴀɴᴇɴᴛʟʏ ʀᴇsᴛʀɪᴄᴛᴇᴅ.</b>\n\n"
+        f'ɪғ ʏᴏᴜ ʙᴇʟɪᴇᴠᴇ ᴛʜɪs ᴡᴀs ᴀ ᴍɪsᴛᴀᴋᴇ, '
+        f'ᴄᴏɴᴛᴀᴄᴛ '
+        f'<a href="tg://user?id={OWNER_ID}">'
+        f"ʟᴏᴢᴏ_⁹⁴"
+        f"</a>."
+    )
+
+
+# =========================================================
 # VERIFY
 # =========================================================
 
-async def verify(update, context, token):
+async def verify(
+    update,
+    context,
+    token,
+):
     uid = update.effective_user.id
 
+    # =====================================================
+    # OWNER EXEMPTION
+    # =====================================================
+
     if uid == OWNER_ID:
-        row = db.get_token(token)
+        row = db.get_token(
+            token
+        )
 
         if row:
-            if int(row["user_id"]) == uid:
-                target = db.consume_token(token, uid)
+            if int(
+                row["user_id"]
+            ) == uid:
+                target = db.consume_token(
+                    token,
+                    uid,
+                )
             else:
                 target = row["target"]
 
@@ -746,8 +1057,12 @@ async def verify(update, context, token):
                 )
 
         return await update.message.reply_text(
-            "❌ ᴛʜɪꜱ ʟɪɴᴋ ɪꜱ ɴᴏᴛ ᴠᴀʟɪᴅ."
+            "❌ ᴛʜɪꜱ ʟɪɴᴋ ɪs ɴᴏᴛ ᴠᴀʟɪᴅ."
         )
+
+    # =====================================================
+    # FORCE SUB
+    # =====================================================
 
     missing = await is_fsub_member(
         context.bot,
@@ -760,21 +1075,122 @@ async def verify(update, context, token):
             "ᴊᴏɪɴ ᴀʟʟ ʀᴇǫᴜɪʀᴇᴅ ᴄʜᴀɴɴᴇʟꜱ "
             "ᴛʜᴇɴ ᴛᴀᴘ ᴄʜᴇᴄᴋ ᴊᴏɪɴ.",
             parse_mode="HTML",
-            reply_markup=fsub_keyboard(missing),
+            reply_markup=fsub_keyboard(
+                missing
+            ),
         )
 
-    row = db.get_token(token)
+    # =====================================================
+    # TOKEN VALIDATION
+    # =====================================================
 
-    if not row or int(row["user_id"]) != uid:
+    row = db.get_token(
+        token
+    )
+
+    if (
+        not row
+        or int(
+            row["user_id"]
+        ) != uid
+    ):
         return await update.message.reply_text(
-            "❌ ᴛʜɪꜱ ꜱʜᴏʀᴛᴇɴᴇʀ ʟɪɴᴋ ɪꜱ ɴᴏᴛ ᴍᴀᴅᴇ ꜰᴏʀ ʏᴏᴜ."
+            "❌ ᴛʜɪꜱ ꜱʜᴏʀᴛᴇɴᴇʀ ʟɪɴᴋ "
+            "ɪs ɴᴏᴛ ᴍᴀᴅᴇ ꜰᴏʀ ʏᴏᴜ."
         )
 
-    target = db.consume_token(token, uid)
+    # =====================================================
+    # ALREADY USED
+    # =====================================================
+
+    if row.get("used"):
+        return await update.message.reply_text(
+            "❌ ᴛʜɪꜱ ꜱʜᴏʀᴛᴇɴᴇʀ ʟɪɴᴋ "
+            "ɪs ᴀʟʀᴇᴀᴅʏ ᴜsᴇᴅ."
+        )
+
+    # =====================================================
+    # EXPIRED CHECK
+    # =====================================================
+
+    try:
+        if db._dt(
+            row["expires_at"]
+        ) <= datetime.now(
+            timezone.utc
+        ):
+            return await update.message.reply_text(
+                "❌ ᴛʜɪꜱ ꜱʜᴏʀᴛᴇɴᴇʀ ʟɪɴᴋ "
+                "ɪs ᴇxᴘɪʀᴇᴅ."
+            )
+
+    except Exception:
+        return await update.message.reply_text(
+            "❌ ᴛʜɪꜱ ꜱʜᴏʀᴛᴇɴᴇʀ ʟɪɴᴋ "
+            "ɪs ɴᴏᴛ ᴠᴀʟɪᴅ."
+        )
+
+    # =====================================================
+    # ANTI-BYPASS CHECK
+    #
+    # Token created when open_main() creates the shortener
+    # token.
+    #
+    # Less than 90 seconds = bypass
+    # 90 seconds or more = normal delivery
+    # =====================================================
+
+    age = db.get_token_age_seconds(
+        token
+    )
+
+    if (
+        age is not None
+        and age < BYPASS_MIN_SECONDS
+    ):
+        log.warning(
+            "BYPASS DETECTED | user=%s | token=%s | age=%.2fs",
+            uid,
+            token,
+            age,
+        )
+
+        # Auto-ban
+        db.ban_user(
+            uid,
+            reason="Bypass Detected",
+        )
+
+        # Invalidate token
+        try:
+            db.consume_token(
+                token,
+                uid,
+            )
+        except Exception:
+            pass
+
+        return await update.message.reply_text(
+            bypass_message(),
+            parse_mode="HTML",
+            link_preview_options=LinkPreviewOptions(
+                is_disabled=True
+            ),
+        )
+
+    # =====================================================
+    # NORMAL DELIVERY
+    # =====================================================
+
+    target = db.consume_token(
+        token,
+        uid,
+    )
 
     if not target:
         return await update.message.reply_text(
-            "❌ ᴛʜɪꜱ ꜱʜᴏʀᴛᴇɴᴇʀ ʟɪɴᴋ ɪꜱ ᴇxᴘɪʀᴇᴅ ᴏʀ ᴀʟʀᴇᴀᴅʏ ᴜꜱᴇᴅ."
+            "❌ ᴛʜɪꜱ ꜱʜᴏʀᴛᴇɴᴇʀ ʟɪɴᴋ "
+            "ɪs ᴇxᴘɪʀᴇᴅ ᴏʀ ᴀʟʀᴇᴀᴅʏ ᴜsᴇᴅ."
         )
 
     await deliver_and_notify(
@@ -788,14 +1204,20 @@ async def verify(update, context, token):
 # OPEN MAIN LINK
 # =========================================================
 
-async def open_main(update, context, token):
+async def open_main(
+    update,
+    context,
+    token,
+):
     uid = update.effective_user.id
 
-    row = db.get_main_link(token)
+    row = db.get_main_link(
+        token
+    )
 
     if not row:
         return await update.message.reply_text(
-            "❌ ᴛʜɪꜱ ʟɪɴᴋ ɪꜱ ɴᴏᴛ ᴠᴀʟɪᴅ."
+            "❌ ᴛʜɪꜱ ʟɪɴᴋ ɪs ɴᴏᴛ ᴠᴀʟɪᴅ."
         )
 
     missing = await is_fsub_member(
@@ -809,15 +1231,31 @@ async def open_main(update, context, token):
             "ᴊᴏɪɴ ᴀʟʟ ʀᴇǫᴜɪʀᴇᴅ ᴄʜᴀɴɴᴇʟꜱ "
             "ᴛʜᴇɴ ᴛᴀᴘ ᴄʜᴇᴄᴋ ᴊᴏɪɴ.",
             parse_mode="HTML",
-            reply_markup=fsub_keyboard(missing),
+            reply_markup=fsub_keyboard(
+                missing
+            ),
         )
 
-    if uid == OWNER_ID or db.is_premium(uid):
+    # =====================================================
+    # OWNER / PREMIUM EXEMPTION
+    # =====================================================
+
+    if (
+        uid == OWNER_ID
+        or db.is_premium(uid)
+    ):
         return await deliver_and_notify(
             update,
             context,
             row["target"],
         )
+
+    # =====================================================
+    # CREATE TOKEN
+    #
+    # created_at is stored here.
+    # Anti-bypass timer starts from this point.
+    # =====================================================
 
     tok = db.create_token(
         uid,
@@ -832,7 +1270,8 @@ async def open_main(update, context, token):
 
     if not short_url:
         return await update.message.reply_text(
-            "⚠️ ꜱʜᴏʀᴛᴇɴᴇʀ ɪꜱ ɴᴏᴛ ᴄᴏɴꜰɪɢᴜʀᴇᴅ ᴄᴏʀʀᴇᴄᴛʟʏ."
+            "⚠️ ꜱʜᴏʀᴛᴇɴᴇʀ ɪꜱ ɴᴏᴛ "
+            "ᴄᴏɴꜰɪɢᴜʀᴇᴅ ᴄᴏʀʀᴇᴄᴛʟʏ."
         )
 
     await send_download_page(
@@ -845,7 +1284,10 @@ async def open_main(update, context, token):
 # START COMMAND
 # =========================================================
 
-async def start(update, context):
+async def start(
+    update,
+    context,
+):
     u = update.effective_user
 
     db.add_user(
@@ -854,7 +1296,9 @@ async def start(update, context):
         u.first_name or "",
     )
 
-    if db.is_banned(u.id):
+    if db.is_banned(
+        u.id
+    ):
         return await update.message.reply_text(
             "🚫 ʏᴏᴜ ᴀʀᴇ ʙᴀɴɴᴇᴅ."
         )
@@ -862,21 +1306,27 @@ async def start(update, context):
     if context.args:
         arg = context.args[0]
 
-        if arg.startswith("verify_"):
+        if arg.startswith(
+            "verify_"
+        ):
             return await verify(
                 update,
                 context,
                 arg[7:],
             )
 
-        if arg.startswith("link_"):
+        if arg.startswith(
+            "link_"
+        ):
             return await open_main(
                 update,
                 context,
                 arg[5:],
             )
 
-    await render_start(update.message)
+    await render_start(
+        update.message
+    )
 
 
 # =========================================================
@@ -904,12 +1354,17 @@ TIMEZONE_OPTIONS = {
 def timezone_keyboard():
     buttons = []
 
-    for tz_name, label in TIMEZONE_OPTIONS.items():
+    for (
+        tz_name,
+        label,
+    ) in TIMEZONE_OPTIONS.items():
         buttons.append(
             [
                 InlineKeyboardButton(
                     label,
-                    callback_data=f"tz:{tz_name}",
+                    callback_data=(
+                        f"tz:{tz_name}"
+                    ),
                 )
             ]
         )
@@ -923,26 +1378,37 @@ def timezone_keyboard():
         ]
     )
 
-    return InlineKeyboardMarkup(buttons)
+    return InlineKeyboardMarkup(
+        buttons
+    )
 
 
-def timezone_display_name(tz_name):
+def timezone_display_name(
+    tz_name
+):
     return TIMEZONE_OPTIONS.get(
         tz_name,
         tz_name,
     )
 
 
-async def timezone_command(update, context):
+async def timezone_command(
+    update,
+    context,
+):
     uid = update.effective_user.id
 
     db.add_user(
         uid,
-        update.effective_user.username or "",
-        update.effective_user.first_name or "",
+        update.effective_user.username
+        or "",
+        update.effective_user.first_name
+        or "",
     )
 
-    current = db.get_user_timezone(uid)
+    current = db.get_user_timezone(
+        uid
+    )
 
     try:
         now_local = datetime.now(
@@ -957,6 +1423,7 @@ async def timezone_command(update, context):
 
     except Exception:
         current = "Asia/Kolkata"
+
         current_time = datetime.now(
             timezone.utc
         ).astimezone(
@@ -986,20 +1453,44 @@ async def timezone_command(update, context):
 # CALLBACK HANDLER
 # =========================================================
 
-async def callback(update, context):
+async def callback(
+    update,
+    context,
+):
     q = update.callback_query
+
     uid = q.from_user.id
 
     # =====================================================
-    # TIMEZONE CALLBACKS
-    # IMPORTANT: These must work for normal users too.
+    # BLOCK BANNED USERS FROM CALLBACKS TOO
     # =====================================================
 
-    if q.data.startswith("tz:"):
+    if uid != OWNER_ID:
+        try:
+            if db.is_banned(uid):
+                await q.answer(
+                    "🚫 ʏᴏᴜ ᴀʀᴇ ʙᴀɴɴᴇᴅ.",
+                    show_alert=True,
+                )
+                return
+
+        except Exception:
+            log.exception(
+                "Callback ban check failed"
+            )
+
+    # =====================================================
+    # TIMEZONE CALLBACKS
+    # =====================================================
+
+    if q.data.startswith(
+        "tz:"
+    ):
         tz_name = q.data[3:]
 
         try:
             ZoneInfo(tz_name)
+
         except Exception:
             return await q.answer(
                 "❌ ɪɴᴠᴀʟɪᴅ ᴛɪᴍᴇᴢᴏɴᴇ.",
@@ -1057,6 +1548,7 @@ async def callback(update, context):
                     ]
                 ),
             )
+
         except Exception:
             pass
 
@@ -1065,7 +1557,9 @@ async def callback(update, context):
     if q.data == "timezone_menu":
         await q.answer()
 
-        current = db.get_user_timezone(uid)
+        current = db.get_user_timezone(
+            uid
+        )
 
         return await q.message.edit_text(
             "🌍 <b>ᴄʜᴏᴏꜱᴇ ʏᴏᴜʀ ᴛɪᴍᴇᴢᴏɴᴇ</b>\n\n"
@@ -1080,6 +1574,7 @@ async def callback(update, context):
 
         try:
             await q.message.delete()
+
         except Exception:
             pass
 
@@ -1095,15 +1590,29 @@ async def callback(update, context):
             show_alert=True,
         )
 
-    if q.data in ("add_admin", "remove_admin") and uid != OWNER_ID:
+    if (
+        q.data in (
+            "add_admin",
+            "remove_admin",
+        )
+        and uid != OWNER_ID
+    ):
         return await q.answer(
-            "🚫 ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ᴀᴅᴅ/ʀᴇᴍᴏᴠᴇ ᴀᴅᴍɪɴꜱ",
+            "🚫 ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ "
+            "ᴀᴅᴅ/ʀᴇᴍᴏᴠᴇ ᴀᴅᴍɪɴꜱ",
             show_alert=True,
         )
 
-    if q.data in ("add_fsub", "remove_fsub") and uid != OWNER_ID:
+    if (
+        q.data in (
+            "add_fsub",
+            "remove_fsub",
+        )
+        and uid != OWNER_ID
+    ):
         return await q.answer(
-            "🚫 ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ᴀᴅᴅ/ʀᴇᴍᴏᴠᴇ ꜰꜱᴜʙ",
+            "🚫 ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ "
+            "ᴀᴅᴅ/ʀᴇᴍᴏᴠᴇ ꜰꜱᴜʙ",
             show_alert=True,
         )
 
@@ -1113,9 +1622,13 @@ async def callback(update, context):
     # CLOSE
     # =====================================================
 
-    if q.data in ("close", "settings_close"):
+    if q.data in (
+        "close",
+        "settings_close",
+    ):
         try:
             await q.message.delete()
+
         except Exception:
             pass
 
@@ -1153,10 +1666,13 @@ async def callback(update, context):
 
         try:
             await q.message.delete()
+
         except Exception:
             pass
 
-        return await render_start(q.message)
+        return await render_start(
+            q.message
+        )
 
     # =====================================================
     # SET START IMAGE
@@ -1182,7 +1698,8 @@ async def callback(update, context):
         return await q.message.reply_text(
             f"🗑️ ᴀᴜᴛᴏ ᴅᴇʟᴇᴛᴇ ᴛɪᴍᴇ: "
             f"<b>{cur} ᴍɪɴᴜᴛᴇꜱ</b>\n\n"
-            "ꜱᴇɴᴅ ᴛʜᴇ ɴᴇᴡ ᴛɪᴍᴇ ɪɴ ᴍɪɴᴜᴛᴇꜱ.\n"
+            "ꜱᴇɴᴅ ᴛʜᴇ ɴᴇᴡ ᴛɪᴍᴇ "
+            "ɪɴ ᴍɪɴᴜᴛᴇꜱ.\n"
             "ꜱᴇɴᴅ <code>0</code> ᴛᴏ ᴅɪꜱᴀʙʟᴇ.",
             parse_mode="HTML",
         )
@@ -1195,23 +1712,35 @@ async def callback(update, context):
         lines = [
             "<b>👮 ᴀᴅᴍɪɴꜱ</b>",
             "",
-            f'• <a href="tg://user?id={OWNER_ID}">'
-            f"ᴏᴡɴᴇʀ</a> — <code>{OWNER_ID}</code>",
+            (
+                f'• <a href="tg://user?id={OWNER_ID}">'
+                f"ᴏᴡɴᴇʀ</a> — "
+                f"<code>{OWNER_ID}</code>"
+            ),
         ]
 
         for a in db.list_admins():
             name = (
                 a["first_name"]
                 or (
-                    "@" + a["username"]
+                    "@"
+                    + a["username"]
                     if a["username"]
                     else "ᴀᴅᴍɪɴ"
                 )
             )
 
+            name = escape(
+                name
+            )
+
             lines.append(
-                f'• <a href="tg://user?id={a["user_id"]}">'
-                f"{name}</a> — <code>{a['user_id']}</code>"
+                (
+                    f'• <a href="tg://user?id='
+                    f'{a["user_id"]}">'
+                    f"{name}</a> — "
+                    f"<code>{a['user_id']}</code>"
+                )
             )
 
         return await q.message.edit_text(
@@ -1246,7 +1775,8 @@ async def callback(update, context):
     if q.data == "add_admin":
         if uid != OWNER_ID:
             return await q.answer(
-                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ᴀᴅᴅ ᴀᴅᴍɪɴꜱ.",
+                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ "
+                "ᴀᴅᴅ ᴀᴅᴍɪɴꜱ.",
                 show_alert=True,
             )
 
@@ -1264,11 +1794,14 @@ async def callback(update, context):
     if q.data == "remove_admin":
         if uid != OWNER_ID:
             return await q.answer(
-                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ʀᴇᴍᴏᴠᴇ ᴀᴅᴍɪɴꜱ.",
+                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ "
+                "ʀᴇᴍᴏᴠᴇ ᴀᴅᴍɪɴꜱ.",
                 show_alert=True,
             )
 
-        _pending_admin.add(-uid)
+        _pending_admin.add(
+            -uid
+        )
 
         return await q.message.reply_text(
             "➖ ꜱᴇɴᴅ ᴛʜᴇ ᴜꜱᴇʀ ɪᴅ "
@@ -1288,19 +1821,35 @@ async def callback(update, context):
         ]
 
         for r in rows:
-            invite = r.get("invite_link", "")
-            title = r.get("title", "ᴄʜᴀɴɴᴇʟ")
+            invite = r.get(
+                "invite_link",
+                "",
+            )
+
+            title = r.get(
+                "title",
+                "ᴄʜᴀɴɴᴇʟ",
+            )
+
+            title = escape(
+                title
+            )
 
             if invite:
                 lines.append(
-                    f'• <a href="{invite}">'
-                    f"{title}</a> — "
-                    f'<code>{r["channel_id"]}</code>'
+                    (
+                        f'• <a href="{escape(invite)}">'
+                        f"{title}</a> — "
+                        f'<code>{r["channel_id"]}</code>'
+                    )
                 )
+
             else:
                 lines.append(
-                    f"• {title} — "
-                    f'<code>{r["channel_id"]}</code>'
+                    (
+                        f"• {title} — "
+                        f'<code>{r["channel_id"]}</code>'
+                    )
                 )
 
         kb = InlineKeyboardMarkup(
@@ -1339,7 +1888,8 @@ async def callback(update, context):
     if q.data == "add_fsub":
         if uid != OWNER_ID:
             return await q.answer(
-                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ᴀᴅᴅ ꜰꜱᴜʙ.",
+                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ "
+                "ᴀᴅᴅ ꜰꜱᴜʙ.",
                 show_alert=True,
             )
 
@@ -1347,7 +1897,8 @@ async def callback(update, context):
 
         return await q.message.reply_text(
             "📢 ꜱᴇɴᴅ ᴛʜᴇ ᴄʜᴀɴɴᴇʟ ɪᴅ ᴏɴʟʏ.\n"
-            "ᴛʜᴇ ʙᴏᴛ ᴡɪʟʟ ɢᴇᴛ ᴛʜᴇ ᴄʜᴀɴɴᴇʟ ɴᴀᴍᴇ ᴀɴᴅ "
+            "ᴛʜᴇ ʙᴏᴛ ᴡɪʟʟ ɢᴇᴛ "
+            "ᴛʜᴇ ᴄʜᴀɴɴᴇʟ ɴᴀᴍᴇ ᴀɴᴅ "
             "ɪɴᴠɪᴛᴇ ʟɪɴᴋ ᴀᴜᴛᴏᴍᴀᴛɪᴄᴀʟʟʏ."
         )
 
@@ -1358,7 +1909,8 @@ async def callback(update, context):
     if q.data == "remove_fsub":
         if uid != OWNER_ID:
             return await q.answer(
-                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ʀᴇᴍᴏᴠᴇ ꜰꜱᴜʙ.",
+                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ "
+                "ʀᴇᴍᴏᴠᴇ ꜰꜱᴜʙ.",
                 show_alert=True,
             )
 
@@ -1367,7 +1919,8 @@ async def callback(update, context):
         )
 
         return await q.message.reply_text(
-            "➖ ꜱᴇɴᴅ ᴛʜᴇ ꜰꜱᴜʙ ᴄʜᴀɴɴᴇʟ ɪᴅ ᴛᴏ ʀᴇᴍᴏᴠᴇ."
+            "➖ ꜱᴇɴᴅ ᴛʜᴇ ꜰꜱᴜʙ "
+            "ᴄʜᴀɴɴᴇʟ ɪᴅ ᴛᴏ ʀᴇᴍᴏᴠᴇ."
         )
 
     # =====================================================
@@ -1386,7 +1939,16 @@ async def callback(update, context):
 # SETTINGS INPUT
 # =========================================================
 
-async def settings_input(update, context):
+async def settings_input(
+    update,
+    context,
+):
+    if not update.effective_user:
+        return
+
+    if not update.message:
+        return
+
     uid = update.effective_user.id
 
     if not admin_ok(uid):
@@ -1396,16 +1958,22 @@ async def settings_input(update, context):
     # START IMAGE
     # =====================================================
 
-    if uid in _pending_image and update.message.photo:
+    if (
+        uid in _pending_image
+        and update.message.photo
+    ):
         db.set_setting(
             "start_image",
             update.message.photo[-1].file_id,
         )
 
-        _pending_image.discard(uid)
+        _pending_image.discard(
+            uid
+        )
 
         return await update.message.reply_text(
-            "✅ ꜱᴛᴀʀᴛ ɪᴍᴀɢᴇ ᴜᴘᴅᴀᴛᴇᴅ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ."
+            "✅ ꜱᴛᴀʀᴛ ɪᴍᴀɢᴇ "
+            "ᴜᴘᴅᴀᴛᴇᴅ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ."
         )
 
     # =====================================================
@@ -1416,7 +1984,9 @@ async def settings_input(update, context):
         try:
             minutes = max(
                 0,
-                int(update.message.text.strip()),
+                int(
+                    update.message.text.strip()
+                ),
             )
 
             db.set_setting(
@@ -1424,7 +1994,9 @@ async def settings_input(update, context):
                 minutes,
             )
 
-            _pending_autodelete.discard(uid)
+            _pending_autodelete.discard(
+                uid
+            )
 
             return await update.message.reply_text(
                 f"✅ ᴀᴜᴛᴏ ᴅᴇʟᴇᴛᴇ ꜱᴇᴛ ᴛᴏ "
@@ -1440,37 +2012,58 @@ async def settings_input(update, context):
     # ADD / REMOVE ADMIN
     # =====================================================
 
-    if uid in _pending_admin or -uid in _pending_admin:
+    if (
+        uid in _pending_admin
+        or -uid in _pending_admin
+    ):
         if uid != OWNER_ID:
-            _pending_admin.discard(uid)
-            _pending_admin.discard(-uid)
+            _pending_admin.discard(
+                uid
+            )
+
+            _pending_admin.discard(
+                -uid
+            )
 
             return await update.message.reply_text(
-                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ᴀᴅᴅ ᴏʀ ʀᴇᴍᴏᴠᴇ ᴀᴅᴍɪɴꜱ."
+                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ "
+                "ᴀᴅᴅ ᴏʀ ʀᴇᴍᴏᴠᴇ ᴀᴅᴍɪɴꜱ."
             )
 
         try:
             target_uid = int(
                 update.message.text.strip()
             )
+
         except Exception:
             return await update.message.reply_text(
                 "❌ ᴇɴᴛᴇʀ ᴀ ᴠᴀʟɪᴅ ᴜꜱᴇʀ ɪᴅ."
             )
 
-        remove_mode = -uid in _pending_admin
+        remove_mode = (
+            -uid in _pending_admin
+        )
 
-        _pending_admin.discard(uid)
-        _pending_admin.discard(-uid)
+        _pending_admin.discard(
+            uid
+        )
+
+        _pending_admin.discard(
+            -uid
+        )
 
         if remove_mode:
-            db.remove_admin(target_uid)
+            db.remove_admin(
+                target_uid
+            )
 
             return await update.message.reply_text(
                 "✅ ᴀᴅᴍɪɴ ʀᴇᴍᴏᴠᴇᴅ."
             )
 
-        db.add_admin(target_uid)
+        db.add_admin(
+            target_uid
+        )
 
         return await update.message.reply_text(
             "✅ ᴀᴅᴍɪɴ ᴀᴅᴅᴇᴅ."
@@ -1482,10 +2075,13 @@ async def settings_input(update, context):
 
     if uid in _pending_fsub:
         if uid != OWNER_ID:
-            _pending_fsub.discard(uid)
+            _pending_fsub.discard(
+                uid
+            )
 
             return await update.message.reply_text(
-                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ᴀᴅᴅ ꜰꜱᴜʙ."
+                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ "
+                "ᴀᴅᴅ ꜰꜱᴜʙ."
             )
 
         try:
@@ -1493,36 +2089,52 @@ async def settings_input(update, context):
                 update.message.text.strip()
             )
 
-            chat = await context.bot.get_chat(cid)
+            chat = await context.bot.get_chat(
+                cid
+            )
 
-            invite = await context.bot.create_chat_invite_link(
-                cid,
-                name="File Store FSub",
+            invite = (
+                await context.bot.create_chat_invite_link(
+                    cid,
+                    name="File Store FSub",
+                )
             )
 
             db.add_fsub(
                 cid,
                 invite.invite_link,
-                chat.title or chat.username or str(cid),
+                (
+                    chat.title
+                    or chat.username
+                    or str(cid)
+                ),
             )
 
-            _pending_fsub.discard(uid)
+            _pending_fsub.discard(
+                uid
+            )
 
             return await update.message.reply_text(
-                f"✅ <b>ꜰꜱᴜʙ ᴀᴅᴅᴇᴅ</b>\n\n"
-                f'📢 <a href="{invite.invite_link}">'
-                f"{chat.title or 'Channel'}</a>\n"
-                f"🆔 <code>{cid}</code>\n"
-                f'🔗 <a href="{invite.invite_link}">'
-                f"ɪɴᴠɪᴛᴇ ʟɪɴᴋ</a>",
+                (
+                    f"✅ <b>ꜰꜱᴜʙ ᴀᴅᴅᴇᴅ</b>\n\n"
+                    f'📢 <a href="{escape(invite.invite_link)}">'
+                    f"{escape(chat.title or 'Channel')}"
+                    f"</a>\n"
+                    f"🆔 <code>{cid}</code>\n"
+                    f'🔗 <a href="{escape(invite.invite_link)}">'
+                    f"ɪɴᴠɪᴛᴇ ʟɪɴᴋ</a>"
+                ),
                 parse_mode="HTML",
             )
 
         except Exception as e:
             return await update.message.reply_text(
-                "❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ᴀᴅᴅ ᴛʜɪꜱ ᴄʜᴀɴɴᴇʟ.\n"
-                "ᴍᴀᴋᴇ ꜱᴜʀᴇ ᴛʜᴇ ʙᴏᴛ ɪꜱ ᴀᴅᴍɪɴ.\n\n"
-                f"<code>{e}</code>",
+                (
+                    "❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ᴀᴅᴅ ᴛʜɪꜱ "
+                    "ᴄʜᴀɴɴᴇʟ.\n"
+                    "ᴍᴀᴋᴇ ꜱᴜʀᴇ ᴛʜᴇ ʙᴏᴛ ɪꜱ ᴀᴅᴍɪɴ.\n\n"
+                    f"<code>{escape(str(e))}</code>"
+                ),
                 parse_mode="HTML",
             )
 
@@ -1530,25 +2142,38 @@ async def settings_input(update, context):
     # REMOVE F-SUB
     # =====================================================
 
-    remkey = uid * 1000000000 + 1
+    remkey = (
+        uid * 1000000000
+        + 1
+    )
 
     if remkey in _pending_fsub:
         if uid != OWNER_ID:
-            _pending_fsub.discard(remkey)
+            _pending_fsub.discard(
+                remkey
+            )
 
             return await update.message.reply_text(
-                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ʀᴇᴍᴏᴠᴇ ꜰꜱᴜʙ."
+                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ "
+                "ʀᴇᴍᴏᴠᴇ ꜰꜱᴜʙ."
             )
 
         try:
-            cid = update.message.text.strip()
+            cid = (
+                update.message.text.strip()
+            )
 
-            db.del_fsub(cid)
+            db.del_fsub(
+                cid
+            )
 
-            _pending_fsub.discard(remkey)
+            _pending_fsub.discard(
+                remkey
+            )
 
             return await update.message.reply_text(
-                "✅ ꜰꜱᴜʙ ᴄʜᴀɴɴᴇʟ ʀᴇᴍᴏᴠᴇᴅ."
+                "✅ ꜰꜱᴜʙ ᴄʜᴀɴɴᴇʟ "
+                "ʀᴇᴍᴏᴠᴇᴅ."
             )
 
         except Exception:
@@ -1561,8 +2186,13 @@ async def settings_input(update, context):
 # PREMIUM ADD
 # =========================================================
 
-async def addsubs(update, context):
-    if not admin_ok(update.effective_user.id):
+async def addsubs(
+    update,
+    context,
+):
+    if not admin_ok(
+        update.effective_user.id
+    ):
         return await update.message.reply_text(
             "❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ."
         )
@@ -1573,8 +2203,13 @@ async def addsubs(update, context):
         )
 
     try:
-        uid = int(context.args[0])
-        days = int(context.args[1])
+        uid = int(
+            context.args[0]
+        )
+
+        days = int(
+            context.args[1]
+        )
 
         if days <= 0:
             raise ValueError
@@ -1586,7 +2221,9 @@ async def addsubs(update, context):
 
     try:
         try:
-            u = await context.bot.get_chat(uid)
+            u = await context.bot.get_chat(
+                uid
+            )
 
             db.add_user(
                 uid,
@@ -1597,9 +2234,11 @@ async def addsubs(update, context):
         except Exception:
             u = None
 
-        start_time, expiry = db.add_premium(
-            uid,
-            days,
+        start_time, expiry = (
+            db.add_premium(
+                uid,
+                days,
+            )
         )
 
         name = (
@@ -1610,24 +2249,30 @@ async def addsubs(update, context):
 
         await context.bot.send_message(
             uid,
-            "🎉 <b>Congratulations!</b>\n\n"
-            f"Your account has been upgraded to the "
-            f"Premium Ad-Free Tier for the next {days} Days.\n"
-            "Enjoy high-speed bypass-free file downloads!",
+            (
+                "🎉 <b>Congratulations!</b>\n\n"
+                "Your account has been upgraded to the "
+                f"Premium Ad-Free Tier for the next "
+                f"{days} Days.\n"
+                "Enjoy high-speed bypass-free file downloads!"
+            ),
             parse_mode="HTML",
         )
 
         await update.message.reply_text(
-            f"<b>✅ Premium Tier Activated Successfully!</b>\n\n"
-            f"👤 Name: {name}\n"
-            f"🆔 User ID: {uid}\n"
-            f"⏳ Duration Allocated: {days} Days",
+            (
+                "<b>✅ Premium Tier Activated "
+                "Successfully!</b>\n\n"
+                f"👤 Name: {escape(name)}\n"
+                f"🆔 User ID: {uid}\n"
+                f"⏳ Duration Allocated: {days} Days"
+            ),
             parse_mode="HTML",
         )
 
     except Exception as e:
         await update.message.reply_text(
-            f"❌ {e}"
+            f"❌ {escape(str(e))}"
         )
 
 
@@ -1635,8 +2280,13 @@ async def addsubs(update, context):
 # PREMIUM REMOVE
 # =========================================================
 
-async def removesubs(update, context):
-    if not admin_ok(update.effective_user.id):
+async def removesubs(
+    update,
+    context,
+):
+    if not admin_ok(
+        update.effective_user.id
+    ):
         return await update.message.reply_text(
             "❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ."
         )
@@ -1647,29 +2297,39 @@ async def removesubs(update, context):
         )
 
     try:
-        uid = int(context.args[0])
+        uid = int(
+            context.args[0]
+        )
+
     except Exception:
         return await update.message.reply_text(
             "❌ ᴇɴᴛᴇʀ ᴀ ᴠᴀʟɪᴅ ᴜꜱᴇʀ ɪᴅ."
         )
 
-    old = db.remove_premium(uid)
+    old = db.remove_premium(
+        uid
+    )
 
     if old:
         try:
             await context.bot.send_message(
                 uid,
-                "🚨 <b>Notification:</b> "
-                "Your premium subscription package has "
-                "been manually revoked by the management team.",
+                (
+                    "🚨 <b>Notification:</b> "
+                    "Your premium subscription package has "
+                    "been manually revoked by the management team."
+                ),
                 parse_mode="HTML",
             )
+
         except Exception:
             pass
 
     await update.message.reply_text(
-        f"✅ ᴘʀᴇᴍɪᴜᴍ ʀᴇᴍᴏᴠᴇᴅ.\n\n"
-        f"ᴜꜱᴇʀ: <code>{uid}</code>",
+        (
+            "✅ ᴘʀᴇᴍɪᴜᴍ ʀᴇᴍᴏᴠᴇᴅ.\n\n"
+            f"ᴜꜱᴇʀ: <code>{uid}</code>"
+        ),
         parse_mode="HTML",
     )
 
@@ -1678,26 +2338,37 @@ async def removesubs(update, context):
 # MY PLAN
 # =========================================================
 
-async def myplan(update, context):
+async def myplan(
+    update,
+    context,
+):
     uid = update.effective_user.id
 
     db.add_user(
         uid,
-        update.effective_user.username or "",
-        update.effective_user.first_name or "",
+        update.effective_user.username
+        or "",
+        update.effective_user.first_name
+        or "",
     )
 
-    plan = db.get_premium(uid)
+    plan = db.get_premium(
+        uid
+    )
 
     if not plan:
         return await update.message.reply_text(
-            "💎 <b>ᴍʏ ᴘʟᴀɴ</b>\n\n"
-            "🔴 ꜱᴛᴀᴛᴜꜱ: ꜰʀᴇᴇ ᴘʟᴀɴ\n\n"
-            "⚡ ꜱʜᴏʀᴛᴇɴᴇʀ ʙʏᴘᴀꜱꜱ: ᴅɪꜱᴀʙʟᴇᴅ\n\n"
-            "💎 ɢᴇᴛ ᴘʀᴇᴍɪᴜᴍ ᴛᴏ ᴇɴᴊᴏʏ "
-            "ꜱʜᴏʀᴛᴇɴᴇʀ-ꜰʀᴇᴇ ᴅᴏᴡɴʟᴏᴀᴅꜱ.\n\n"
-            'ᴄᴏɴᴛᴀᴄᴛ: '
-            '<a href="https://t.me/Its_Lozo">@ɪᴛꜱ_ʟᴏᴢᴏ</a>',
+            (
+                "💎 <b>ᴍʏ ᴘʟᴀɴ</b>\n\n"
+                "🔴 ꜱᴛᴀᴛᴜꜱ: ꜰʀᴇᴇ ᴘʟᴀɴ\n\n"
+                "⚡ ꜱʜᴏʀᴛᴇɴᴇʀ ʙʏᴘᴀꜱꜱ: ᴅɪꜱᴀʙʟᴇᴅ\n\n"
+                "💎 ɢᴇᴛ ᴘʀᴇᴍɪᴜᴍ ᴛᴏ ᴇɴᴊᴏʏ "
+                "ꜱʜᴏʀᴛᴇɴᴇʀ-ꜰʀᴇᴇ ᴅᴏᴡɴʟᴏᴀᴅꜱ.\n\n"
+                'ᴄᴏɴᴛᴀᴄᴛ: '
+                '<a href="https://t.me/Its_Lozo">'
+                "@ɪᴛꜱ_ʟᴏᴢᴏ"
+                "</a>"
+            ),
             parse_mode="HTML",
             link_preview_options=LinkPreviewOptions(
                 is_disabled=True
@@ -1705,71 +2376,118 @@ async def myplan(update, context):
         )
 
     try:
-        start = db._dt(plan["starts_at"])
-        expiry = db._dt(plan["expires_at"])
-        now = datetime.now(timezone.utc)
+        start = db._dt(
+            plan["starts_at"]
+        )
+
+        expiry = db._dt(
+            plan["expires_at"]
+        )
+
+        now = datetime.now(
+            timezone.utc
+        )
 
         if expiry <= now:
             return await update.message.reply_text(
-                "💎 <b>ᴍʏ ᴘʟᴀɴ</b>\n\n"
-                "🔴 ꜱᴛᴀᴛᴜꜱ: ꜰʀᴇᴍɪᴜᴍ ᴇxᴘɪʀᴇᴅ\n\n"
-                "⚡ ꜱʜᴏʀᴛᴇɴᴇʀ ʙʏᴘᴀꜱꜱ: ᴅɪꜱᴀʙʟᴇᴅ",
+                (
+                    "💎 <b>ᴍʏ ᴘʟᴀɴ</b>\n\n"
+                    "🔴 ꜱᴛᴀᴛᴜꜱ: ꜰʀᴇᴍɪᴜᴍ ᴇxᴘɪʀᴇᴅ\n\n"
+                    "⚡ ꜱʜᴏʀᴛᴇɴᴇʀ ʙʏᴘᴀꜱꜱ: ᴅɪꜱᴀʙʟᴇᴅ"
+                ),
                 parse_mode="HTML",
                 link_preview_options=LinkPreviewOptions(
                     is_disabled=True
                 ),
             )
 
-        remaining = expiry - now
+        remaining = (
+            expiry - now
+        )
+
         total_seconds = int(
             remaining.total_seconds()
         )
 
-        days = total_seconds // 86400
+        days = (
+            total_seconds
+            // 86400
+        )
+
         hours = (
-            total_seconds % 86400
+            total_seconds
+            % 86400
         ) // 3600
+
         minutes = (
-            total_seconds % 3600
+            total_seconds
+            % 3600
         ) // 60
 
         remaining_text = (
-            f"{days}d {hours}h {minutes}m"
+            (
+                f"{days}d "
+                f"{hours}h "
+                f"{minutes}m"
+            )
             if days > 0
-            else f"{hours}h {minutes}m"
+            else (
+                f"{hours}h "
+                f"{minutes}m"
+            )
         )
 
-        # =============================================
-        # USER SELECTED TIMEZONE
-        # =============================================
-
-        user_tz_name = db.get_user_timezone(uid)
+        user_tz_name = (
+            db.get_user_timezone(
+                uid
+            )
+        )
 
         try:
-            user_tz = ZoneInfo(user_tz_name)
+            user_tz = ZoneInfo(
+                user_tz_name
+            )
+
         except Exception:
-            user_tz_name = "Asia/Kolkata"
+            user_tz_name = (
+                "Asia/Kolkata"
+            )
+
             user_tz = IST
 
-        local_start = start.astimezone(user_tz)
-        local_expiry = expiry.astimezone(user_tz)
+        local_start = (
+            start.astimezone(
+                user_tz
+            )
+        )
 
-        tz_label = timezone_display_name(
-            user_tz_name
+        local_expiry = (
+            expiry.astimezone(
+                user_tz
+            )
+        )
+
+        tz_label = (
+            timezone_display_name(
+                user_tz_name
+            )
         )
 
         return await update.message.reply_text(
-            "💎 <b>ᴍʏ ᴘʟᴀɴ</b>\n\n"
-            "🟢 ꜱᴛᴀᴛᴜꜱ: ᴘʀᴇᴍɪᴜᴍ ᴀᴄᴛɪᴠᴇ\n\n"
-            f"🌍 ᴛɪᴍᴇᴢᴏɴᴇ: <b>{tz_label}</b>\n\n"
-            f"📅 ᴀᴄᴛɪᴠᴀᴛᴇᴅ ᴏɴ: "
-            f"<code>{local_start.strftime('%d-%m-%Y %I:%M:%S %p')}</code>\n"
-            f"⏳ ᴇxᴘɪʀᴇꜱ ᴏɴ: "
-            f"<code>{local_expiry.strftime('%d-%m-%Y %I:%M:%S %p')}</code>\n"
-            f"⏱ ᴛɪᴍᴇ ʀᴇᴍᴀɪɴɪɴɢ: "
-            f"<b>{remaining_text}</b>\n\n"
-            "⚡ ꜱʜᴏʀᴛᴇɴᴇʀ ʙʏᴘᴀꜱꜱ: 🟢 ᴇɴᴀʙʟᴇᴅ\n\n"
-            "💎 ᴛʜᴀɴᴋ ʏᴏᴜ ꜰᴏʀ ᴜsɪɴɢ ᴘʀᴇᴍɪᴜᴍ!",
+            (
+                "💎 <b>ᴍʏ ᴘʟᴀɴ</b>\n\n"
+                "🟢 ꜱᴛᴀᴛᴜꜱ: ᴘʀᴇᴍɪᴜᴍ ᴀᴄᴛɪᴠᴇ\n\n"
+                f"🌍 ᴛɪᴍᴇᴢᴏɴᴇ: <b>{tz_label}</b>\n\n"
+                f"📅 ᴀᴄᴛɪᴠᴀᴛᴇᴅ ᴏɴ: "
+                f"<code>{local_start.strftime('%d-%m-%Y %I:%M:%S %p')}</code>\n"
+                f"⏳ ᴇxᴘɪʀᴇꜱ ᴏɴ: "
+                f"<code>{local_expiry.strftime('%d-%m-%Y %I:%M:%S %p')}</code>\n"
+                f"⏱ ᴛɪᴍᴇ ʀᴇᴍᴀɪɴɪɴɢ: "
+                f"<b>{remaining_text}</b>\n\n"
+                "⚡ ꜱʜᴏʀᴛᴇɴᴇʀ ʙʏᴘᴀꜱꜱ: "
+                "🟢 ᴇɴᴀʙʟᴇᴅ\n\n"
+                "💎 ᴛʜᴀɴᴋ ʏᴏᴜ ꜰᴏʀ ᴜsɪɴɢ ᴘʀᴇᴍɪᴜᴍ!"
+            ),
             parse_mode="HTML",
             link_preview_options=LinkPreviewOptions(
                 is_disabled=True
@@ -1777,10 +2495,13 @@ async def myplan(update, context):
         )
 
     except Exception:
-        log.exception("Myplan failed")
+        log.exception(
+            "Myplan failed"
+        )
 
         return await update.message.reply_text(
-            "❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ʟᴏᴀᴅ ʏᴏᴜʀ ᴘʟᴀɴ ᴅᴇᴛᴀɪʟꜱ."
+            "❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ʟᴏᴀᴅ "
+            "ʏᴏᴜʀ ᴘʟᴀɴ ᴅᴇᴛᴀɪʟꜱ."
         )
 
 
@@ -1789,8 +2510,13 @@ async def myplan(update, context):
 # ALWAYS IST
 # =========================================================
 
-async def list_premium(update, context):
-    if not admin_ok(update.effective_user.id):
+async def list_premium(
+    update,
+    context,
+):
+    if not admin_ok(
+        update.effective_user.id
+    ):
         return await update.message.reply_text(
             "❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ."
         )
@@ -1799,7 +2525,8 @@ async def list_premium(update, context):
 
     if not rows:
         return await update.message.reply_text(
-            "📋 ɴᴏ ᴀᴄᴛɪᴠᴇ ᴘʀᴇᴍɪᴜᴍ ꜱᴜʙꜱᴄʀɪᴘᴛɪᴏɴꜱ."
+            "📋 ɴᴏ ᴀᴄᴛɪᴠᴇ ᴘʀᴇᴍɪᴜᴍ "
+            "ꜱᴜʙꜱᴄʀɪᴘᴛɪᴏɴꜱ."
         )
 
     users_cache = {
@@ -1812,43 +2539,71 @@ async def list_premium(update, context):
         "",
     ]
 
-    for i, r in enumerate(rows, 1):
-        uid = int(r["user_id"])
-        u = users_cache.get(uid, {})
+    for i, r in enumerate(
+        rows,
+        1,
+    ):
+        uid = int(
+            r["user_id"]
+        )
+
+        u = users_cache.get(
+            uid,
+            {},
+        )
 
         def fmt(value):
             return (
                 db._dt(value)
                 .astimezone(IST)
-                .strftime("%d-%m-%Y %I:%M:%S %p")
+                .strftime(
+                    "%d-%m-%Y %I:%M:%S %p"
+                )
             )
 
-        name = u.get("first_name") or "User"
+        name = (
+            u.get(
+                "first_name"
+            )
+            or "User"
+        )
+
         username = (
-            f"@{u.get('username')}"
+            "@"
+            + u.get("username")
             if u.get("username")
             else "—"
         )
 
         lines.append(
-            f"<b>#{i}</b>\n"
-            f'👤 <a href="tg://user?id={uid}">'
-            f"{name}</a>\n"
-            f"🔹 Username: {username}\n"
-            f"🆔 User ID: <code>{uid}</code>\n"
-            f"🟢 Start: <code>"
-            f"{fmt(r.get('starts_at', r['expires_at']))}"
-            f" IST</code>\n"
-            f"🔴 End: <code>"
-            f"{fmt(r['expires_at'])}"
-            f" IST</code>\n"
+            (
+                f"<b>#{i}</b>\n"
+                f'👤 <a href="tg://user?id={uid}">'
+                f"{escape(name)}</a>\n"
+                f"🔹 Username: {escape(username)}\n"
+                f"🆔 User ID: <code>{uid}</code>\n"
+                f"🟢 Start: <code>"
+                f"{fmt(r.get('starts_at', r['expires_at']))}"
+                f" IST</code>\n"
+                f"🔴 End: <code>"
+                f"{fmt(r['expires_at'])}"
+                f" IST</code>\n"
+            )
         )
 
-    text = "\n".join(lines)
+    text = "\n".join(
+        lines
+    )
 
-    for pos in range(0, len(text), 3900):
+    for pos in range(
+        0,
+        len(text),
+        3900,
+    ):
         await update.message.reply_text(
-            text[pos:pos + 3900],
+            text[
+                pos:pos + 3900
+            ],
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
@@ -1858,7 +2613,10 @@ async def list_premium(update, context):
 # BAN USER
 # =========================================================
 
-async def banuser(update, context):
+async def banuser(
+    update,
+    context,
+):
     uid = update.effective_user.id
 
     if not admin_ok(uid):
@@ -1872,23 +2630,34 @@ async def banuser(update, context):
         )
 
     try:
-        target_id = int(context.args[0])
+        target_id = int(
+            context.args[0]
+        )
+
     except ValueError:
         return await update.message.reply_text(
-            "❌ ᴘʟᴇᴀꜱᴇ ᴇɴᴛᴇʀ ᴀ ᴠᴀʟɪᴅ ᴜꜱᴇʀ ɪᴅ."
+            "❌ ᴘʟᴇᴀꜱᴇ ᴇɴᴛᴇʀ "
+            "ᴀ ᴠᴀʟɪᴅ ᴜꜱᴇʀ ɪᴅ."
         )
 
     if target_id == OWNER_ID:
         return await update.message.reply_text(
-            "❌ ᴏᴡɴᴇʀ ᴄᴀɴɴᴏᴛ ʙᴇ ʙᴀɴɴᴇᴅ."
+            "❌ ᴏᴡɴᴇʀ ᴄᴀɴɴᴏᴛ "
+            "ʙᴇ ʙᴀɴɴᴇᴅ."
         )
 
-    if db.is_banned(target_id):
+    if db.is_banned(
+        target_id
+    ):
         return await update.message.reply_text(
-            "⚠️ ᴛʜɪꜱ ᴜꜱᴇʀ ɪꜱ ᴀʟʀᴇᴀᴅʏ ʙᴀɴɴᴇᴅ."
+            "⚠️ ᴛʜɪꜱ ᴜꜱᴇʀ "
+            "ɪs ᴀʟʀᴇᴀᴅʏ ʙᴀɴɴᴇᴅ."
         )
 
-    db.ban_user(target_id)
+    db.ban_user(
+        target_id,
+        reason="Manual Ban",
+    )
 
     try:
         await context.bot.send_message(
@@ -1896,12 +2665,16 @@ async def banuser(update, context):
             "🚫 <b>You Are Banned From Using The Bot</b> 🚫",
             parse_mode="HTML",
         )
+
     except Exception:
         pass
 
     await update.message.reply_text(
-        "✅ <b>ᴜꜱᴇʀ ʙᴀɴɴᴇᴅ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ.</b>\n\n"
-        f"🆔 <code>{target_id}</code>",
+        (
+            "✅ <b>ᴜꜱᴇʀ ʙᴀɴɴᴇᴅ "
+            "ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ.</b>\n\n"
+            f"🆔 <code>{target_id}</code>"
+        ),
         parse_mode="HTML",
     )
 
@@ -1910,7 +2683,10 @@ async def banuser(update, context):
 # UNBAN USER
 # =========================================================
 
-async def unbanuser(update, context):
+async def unbanuser(
+    update,
+    context,
+):
     uid = update.effective_user.id
 
     if not admin_ok(uid):
@@ -1924,32 +2700,47 @@ async def unbanuser(update, context):
         )
 
     try:
-        target_id = int(context.args[0])
+        target_id = int(
+            context.args[0]
+        )
+
     except ValueError:
         return await update.message.reply_text(
-            "❌ ᴘʟᴇᴀꜱᴇ ᴇɴᴛᴇʀ ᴀ ᴠᴀʟɪᴅ ᴜꜱᴇʀ ɪᴅ."
+            "❌ ᴘʟᴇᴀꜱᴇ ᴇɴᴛᴇʀ "
+            "ᴀ ᴠᴀʟɪᴅ ᴜꜱᴇʀ ɪᴅ."
         )
 
-    if not db.is_banned(target_id):
+    if not db.is_banned(
+        target_id
+    ):
         return await update.message.reply_text(
-            "⚠️ ᴛʜɪꜱ ᴜꜱᴇʀ ɪꜱ ɴᴏᴛ ʙᴀɴɴᴇᴅ."
+            "⚠️ ᴛʜɪꜱ ᴜꜱᴇʀ "
+            "ɪs ɴᴏᴛ ʙᴀɴɴᴇᴅ."
         )
 
-    db.unban_user(target_id)
+    db.unban_user(
+        target_id
+    )
 
     try:
         await context.bot.send_message(
             target_id,
-            "✅ <b>Your ban has been removed.</b>\n\n"
-            "You can use the bot again.",
+            (
+                "✅ <b>Your ban has been removed.</b>\n\n"
+                "You can use the bot again."
+            ),
             parse_mode="HTML",
         )
+
     except Exception:
         pass
 
     await update.message.reply_text(
-        "✅ <b>ᴜꜱᴇʀ ᴜɴʙᴀɴɴᴇᴅ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ.</b>\n\n"
-        f"🆔 <code>{target_id}</code>",
+        (
+            "✅ <b>ᴜꜱᴇʀ ᴜɴʙᴀɴɴᴇᴅ "
+            "ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ.</b>\n\n"
+            f"🆔 <code>{target_id}</code>"
+        ),
         parse_mode="HTML",
     )
 
@@ -1958,7 +2749,10 @@ async def unbanuser(update, context):
 # BANNED USER LIST
 # =========================================================
 
-async def banuser_list(update, context):
+async def banuser_list(
+    update,
+    context,
+):
     uid = update.effective_user.id
 
     if not admin_ok(uid):
@@ -1966,12 +2760,17 @@ async def banuser_list(update, context):
             "❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ."
         )
 
-    banned_users = db.list_banned_users()
+    banned_users = (
+        db.list_banned_users()
+    )
 
     if not banned_users:
         return await update.message.reply_text(
-            "📋 <b>ᴜɴɢᴀɴɢ ᴜꜱᴇʀ ʟɪꜱᴛ</b>\n\n"
-            "✅ ɴᴏ ᴜꜱᴇʀ ɪꜱ ᴄᴜʀʀᴇɴᴛʟʏ ʙᴀɴɴᴇᴅ.",
+            (
+                "📋 <b>ʙᴀɴɴᴇᴅ ᴜꜱᴇʀ ʟɪꜱᴛ</b>\n\n"
+                "✅ ɴᴏ ᴜꜱᴇʀ ɪs "
+                "ᴄᴜʀʀᴇɴᴛʟʏ ʙᴀɴɴᴇᴅ."
+            ),
             parse_mode="HTML",
         )
 
@@ -1980,43 +2779,82 @@ async def banuser_list(update, context):
         "",
     ]
 
-    for i, row in enumerate(banned_users, 1):
-        user_id = int(row["user_id"])
+    for i, row in enumerate(
+        banned_users,
+        1,
+    ):
+        user_id = int(
+            row["user_id"]
+        )
 
         try:
-            user = await context.bot.get_chat(user_id)
-
-            name = user.full_name or "Unknown"
-
-            username = (
-                f"@{user.username}"
-                if user.username
-                else "No Username"
+            user = await context.bot.get_chat(
+                user_id
             )
 
-            profile_link = (
-                f'<a href="tg://user?id={user_id}">'
-                f"{name}</a>"
+            name = (
+                user.full_name
+                or "Unknown"
+            )
+
+            username = (
+                "@"
+                + user.username
+                if user.username
+                else "No Username"
             )
 
         except Exception:
             name = "Unknown"
             username = "No Username"
 
-            profile_link = (
-                f'<a href="tg://user?id={user_id}">'
-                f"Unknown User</a>"
-            )
-
-        lines.append(
-            f"<b>{i}.</b> {profile_link}\n"
-            f"👤 Name: <code>{name}</code>\n"
-            f"🔗 Username: {username}\n"
-            f"🆔 UID: <code>{user_id}</code>\n"
-            f"━━━━━━━━━━━━━━"
+        profile_link = (
+            f'<a href="tg://user?id={user_id}">'
+            f"{escape(name)}</a>"
         )
 
-    text = "\n".join(lines)
+        reason = (
+            row.get("reason")
+            or "Manual Ban"
+        )
+
+        banned_at = row.get(
+            "banned_at"
+        )
+
+        if banned_at:
+            try:
+                banned_time = (
+                    db._dt(
+                        banned_at
+                    )
+                    .astimezone(IST)
+                    .strftime(
+                        "%d-%m-%Y %I:%M:%S %p"
+                    )
+                )
+
+            except Exception:
+                banned_time = "—"
+
+        else:
+            banned_time = "—"
+
+        lines.append(
+            (
+                f"<b>{i}.</b> {profile_link}\n"
+                f"👤 Name: <code>{escape(name)}</code>\n"
+                f"🔗 Username: {escape(username)}\n"
+                f"🆔 UID: <code>{user_id}</code>\n"
+                f"⚠️ Reason: <code>{escape(str(reason))}</code>\n"
+                f"🕐 Banned: <code>{banned_time} IST</code>\n"
+                f"━━━━━━━━━━━━━━"
+            )
+        )
+
+    text = "\n".join(
+        lines
+    )
 
     if len(text) <= 4000:
         return await update.message.reply_text(
@@ -2028,7 +2866,12 @@ async def banuser_list(update, context):
     chunk = ""
 
     for line in lines:
-        if len(chunk) + len(line) + 1 > 4000:
+        if (
+            len(chunk)
+            + len(line)
+            + 1
+            > 4000
+        ):
             await update.message.reply_text(
                 chunk,
                 parse_mode="HTML",
@@ -2037,7 +2880,10 @@ async def banuser_list(update, context):
 
             chunk = ""
 
-        chunk += line + "\n"
+        chunk += (
+            line
+            + "\n"
+        )
 
     if chunk:
         await update.message.reply_text(
@@ -2051,8 +2897,13 @@ async def banuser_list(update, context):
 # USERS
 # =========================================================
 
-async def users(update, context):
-    if not admin_ok(update.effective_user.id):
+async def users(
+    update,
+    context,
+):
+    if not admin_ok(
+        update.effective_user.id
+    ):
         return await update.message.reply_text(
             "❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ."
         )
@@ -2065,26 +2916,46 @@ async def users(update, context):
     ]
 
     for r in rows:
-        uid = int(r["user_id"])
-        name = r.get("first_name") or "User"
+        uid = int(
+            r["user_id"]
+        )
+
+        name = (
+            r.get(
+                "first_name"
+            )
+            or "User"
+        )
 
         username = (
-            "@" + r["username"]
+            "@"
+            + r["username"]
             if r.get("username")
             else "—"
         )
 
         lines.append(
-            f'• <a href="tg://user?id={uid}">'
-            f"{name}</a> | {username} | "
-            f"<code>{uid}</code>"
+            (
+                f'• <a href="tg://user?id={uid}">'
+                f"{escape(name)}</a> | "
+                f"{escape(username)} | "
+                f"<code>{uid}</code>"
+            )
         )
 
-    text = "\n".join(lines)
+    text = "\n".join(
+        lines
+    )
 
-    for pos in range(0, len(text), 3900):
+    for pos in range(
+        0,
+        len(text),
+        3900,
+    ):
         await update.message.reply_text(
-            text[pos:pos + 3900],
+            text[
+                pos:pos + 3900
+            ],
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
@@ -2094,20 +2965,29 @@ async def users(update, context):
 # BROADCAST
 # =========================================================
 
-async def broadcast(update, context):
-    if not admin_ok(update.effective_user.id):
+async def broadcast(
+    update,
+    context,
+):
+    if not admin_ok(
+        update.effective_user.id
+    ):
         return await update.message.reply_text(
             "❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ."
         )
 
-    replied = update.message.reply_to_message
+    replied = (
+        update.message.reply_to_message
+    )
 
     if not replied:
         return await update.message.reply_text(
-            "ʀᴇᴘʟʏ ᴛᴏ ᴛʜᴇ ᴍᴇꜱꜱᴀɢᴇ ʏᴏᴜ "
-            "ᴡᴀɴᴛ ᴛᴏ ʙʀᴏᴀᴅᴄᴀꜱᴛ.\n\n"
-            "/ʙʀᴏᴀᴅᴄᴀꜱᴛ\n"
-            "/ʙʀᴏᴀᴅᴄᴀꜱᴛ 24ʜ"
+            (
+                "ʀᴇᴘʟʏ ᴛᴏ ᴛʜᴇ ᴍᴇꜱꜱᴀɢᴇ "
+                "ʏᴏᴜ ᴡᴀɴᴛ ᴛᴏ ʙʀᴏᴀᴅᴄᴀꜱᴛ.\n\n"
+                "/ʙʀᴏᴀᴅᴄᴀꜱᴛ\n"
+                "/ʙʀᴏᴀᴅᴄᴀꜱᴛ 24ʜ"
+            )
         )
 
     arg = (
@@ -2117,19 +2997,28 @@ async def broadcast(update, context):
     )
 
     delete_after = None
+
     mode = "BROADCAST"
+
     lifespan = "Permanent"
 
     if arg.endswith("h"):
         try:
-            hours = int(arg[:-1])
+            hours = int(
+                arg[:-1]
+            )
 
             delete_after = (
-                datetime.now(timezone.utc)
-                + timedelta(hours=hours)
+                datetime.now(
+                    timezone.utc
+                )
+                + timedelta(
+                    hours=hours
+                )
             )
 
             mode = "PBROADCAST"
+
             lifespan = arg
 
         except Exception:
@@ -2138,13 +3027,19 @@ async def broadcast(update, context):
     rows = db.list_users()
 
     total = len(rows)
+
     success = 0
+
     blocked = 0
+
     failed = 0
+
     sent = []
 
     for r in rows:
-        uid = int(r["user_id"])
+        uid = int(
+            r["user_id"]
+        )
 
         try:
             message = await context.bot.copy_message(
@@ -2154,6 +3049,7 @@ async def broadcast(update, context):
             )
 
             success += 1
+
             sent.append(
                 (
                     uid,
@@ -2163,13 +3059,17 @@ async def broadcast(update, context):
 
         except Exception as e:
             if (
-                "blocked" in str(e).lower()
-                or "chat not found" in str(e).lower()
+                "blocked"
+                in str(e).lower()
+                or "chat not found"
+                in str(e).lower()
             ):
                 blocked += 1
 
                 try:
-                    db.delete_user(uid)
+                    db.delete_user(
+                        uid
+                    )
                 except Exception:
                     pass
 
@@ -2177,13 +3077,20 @@ async def broadcast(update, context):
                 failed += 1
 
     if delete_after:
-        async def delete_broadcast_job(ctx):
-            for user_id, message_id in sent:
+
+        async def delete_broadcast_job(
+            ctx
+        ):
+            for (
+                user_id,
+                message_id,
+            ) in sent:
                 try:
                     await ctx.bot.delete_message(
                         user_id,
                         message_id,
                     )
+
                 except Exception:
                     pass
 
@@ -2191,7 +3098,9 @@ async def broadcast(update, context):
             1,
             (
                 delete_after
-                - datetime.now(timezone.utc)
+                - datetime.now(
+                    timezone.utc
+                )
             ).total_seconds(),
         )
 
@@ -2222,24 +3131,38 @@ async def broadcast(update, context):
 # DB CHANNEL INDEXER
 # =========================================================
 
-async def channel_post_indexer(update, context):
+async def channel_post_indexer(
+    update,
+    context,
+):
     post = update.channel_post
 
-    if not post or post.chat_id != DB_CHANNEL_ID:
+    if (
+        not post
+        or post.chat_id != DB_CHANNEL_ID
+    ):
         return
 
     try:
-        file_id = db.add_file(
+        db.add_file(
             DB_CHANNEL_ID,
             post.message_id,
-            post.caption or post.text or "",
+            post.caption
+            or post.text
+            or "",
         )
 
         token = db.create_main_link(
-            f"message:{DB_CHANNEL_ID}:{post.message_id}"
+            (
+                f"message:"
+                f"{DB_CHANNEL_ID}:"
+                f"{post.message_id}"
+            )
         )
 
-        url = main_link_url(token)
+        url = main_link_url(
+            token
+        )
 
         markup = InlineKeyboardMarkup(
             [
@@ -2258,9 +3181,11 @@ async def channel_post_indexer(update, context):
                 message_id=post.message_id,
                 reply_markup=markup,
             )
+
         except Exception:
             log.exception(
-                "Could not add share button to DB message"
+                "Could not add share button "
+                "to DB message"
             )
 
     except Exception:
@@ -2274,6 +3199,7 @@ async def channel_post_indexer(update, context):
 # =========================================================
 
 def main():
+
     threading.Thread(
         target=start_health_server,
         daemon=True,
@@ -2302,59 +3228,98 @@ def main():
     # =====================================================
 
     app.add_handler(
-        CommandHandler("start", start)
+        CommandHandler(
+            "start",
+            start,
+        )
     )
 
     app.add_handler(
-        CommandHandler("genlink", genlink)
+        CommandHandler(
+            "genlink",
+            genlink,
+        )
     )
 
     app.add_handler(
-        CommandHandler("batch", batch)
+        CommandHandler(
+            "batch",
+            batch,
+        )
     )
 
     app.add_handler(
-        CommandHandler("settings", settings)
+        CommandHandler(
+            "settings",
+            settings,
+        )
     )
 
     app.add_handler(
-        CommandHandler("banuser", banuser)
+        CommandHandler(
+            "banuser",
+            banuser,
+        )
     )
 
     app.add_handler(
-        CommandHandler("unbanuser", unbanuser)
+        CommandHandler(
+            "unbanuser",
+            unbanuser,
+        )
     )
 
     app.add_handler(
-        CommandHandler("banuser_list", banuser_list)
+        CommandHandler(
+            "banuser_list",
+            banuser_list,
+        )
     )
 
     app.add_handler(
-        CommandHandler("addsubs", addsubs)
+        CommandHandler(
+            "addsubs",
+            addsubs,
+        )
     )
 
     app.add_handler(
-        CommandHandler("removesubs", removesubs)
+        CommandHandler(
+            "removesubs",
+            removesubs,
+        )
     )
 
     app.add_handler(
-        CommandHandler("list_premium", list_premium)
+        CommandHandler(
+            "list_premium",
+            list_premium,
+        )
     )
 
     app.add_handler(
-        CommandHandler("users", users)
+        CommandHandler(
+            "users",
+            users,
+        )
     )
 
     app.add_handler(
-        CommandHandler("broadcast", broadcast)
+        CommandHandler(
+            "broadcast",
+            broadcast,
+        )
     )
 
     app.add_handler(
-        CommandHandler("myplan", myplan)
+        CommandHandler(
+            "myplan",
+            myplan,
+        )
     )
 
     # =====================================================
-    # TIMEZONE COMMAND
+    # TIMEZONE
     # =====================================================
 
     app.add_handler(
@@ -2365,11 +3330,13 @@ def main():
     )
 
     # =====================================================
-    # CALLBACK HANDLER
+    # CALLBACK
     # =====================================================
 
     app.add_handler(
-        CallbackQueryHandler(callback)
+        CallbackQueryHandler(
+            callback
+        )
     )
 
     # =====================================================
@@ -2379,7 +3346,10 @@ def main():
     app.add_handler(
         MessageHandler(
             filters.PHOTO
-            | (filters.TEXT & ~filters.COMMAND),
+            | (
+                filters.TEXT
+                & ~filters.COMMAND
+            ),
             settings_input,
         ),
         group=1,
@@ -2397,7 +3367,9 @@ def main():
         group=10,
     )
 
-    log.info("Bot starting")
+    log.info(
+        "Bot starting"
+    )
 
     app.run_polling(
         allowed_updates=Update.ALL_TYPES,

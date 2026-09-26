@@ -2438,7 +2438,7 @@ async def addsubs(
         except Exception:
             u = None
 
-                start_time, expiry = (
+        start_time, expiry = (
             db.add_premium(
                 uid,
                 days,

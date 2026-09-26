@@ -453,6 +453,71 @@ def admin_ok(uid):
 
 
 # =========================================================
+# URL PREVIEW CONTROL
+# =========================================================
+
+async def disable_copied_message_preview(
+    bot,
+    message,
+):
+    """
+    Disable Telegram URL preview on a copied message.
+
+    Handles:
+        - normal text messages
+        - media messages with captions
+
+    Other message types are returned unchanged.
+    """
+
+    if not message:
+        return message
+
+    try:
+        # -------------------------------------------------
+        # TEXT MESSAGE
+        # -------------------------------------------------
+        if message.text:
+            edited = await bot.edit_message_text(
+                chat_id=message.chat_id,
+                message_id=message.message_id,
+                text=message.text,
+                entities=message.entities,
+                link_preview_options=LinkPreviewOptions(
+                    is_disabled=True
+                ),
+                reply_markup=message.reply_markup,
+            )
+
+            return edited
+
+        # -------------------------------------------------
+        # MEDIA MESSAGE WITH CAPTION
+        # -------------------------------------------------
+        if message.caption:
+            edited = await bot.edit_message_caption(
+                chat_id=message.chat_id,
+                message_id=message.message_id,
+                caption=message.caption,
+                caption_entities=message.caption_entities,
+                link_preview_options=LinkPreviewOptions(
+                    is_disabled=True
+                ),
+                reply_markup=message.reply_markup,
+            )
+
+            return edited
+
+    except Exception:
+        log.exception(
+            "Could not disable URL preview "
+            "for copied message"
+        )
+
+    return message
+
+
+# =========================================================
 # SETTINGS
 # =========================================================
 
@@ -540,10 +605,21 @@ async def genlink(
         )
 
     try:
+        # -------------------------------------------------
+        # COPY FILE TO DB CHANNEL
+        # -------------------------------------------------
         copied = await context.bot.copy_message(
             chat_id=DB_CHANNEL_ID,
             from_chat_id=replied.chat_id,
             message_id=replied.message_id,
+        )
+
+        # -------------------------------------------------
+        # DISABLE URL PREVIEW IN DB CHANNEL
+        # -------------------------------------------------
+        copied = await disable_copied_message_preview(
+            context.bot,
+            copied,
         )
 
         db.add_file(
@@ -865,6 +941,10 @@ async def deliver_target(
         update.effective_chat.id
     )
 
+    # =====================================================
+    # SINGLE MESSAGE
+    # =====================================================
+
     if target.startswith(
         "message:"
     ):
@@ -879,9 +959,21 @@ async def deliver_target(
             message_id=int(mid),
         )
 
+        # -------------------------------------------------
+        # DISABLE URL PREVIEW FOR USER
+        # -------------------------------------------------
+        message = await disable_copied_message_preview(
+            bot,
+            message,
+        )
+
         ids.append(
             message.message_id
         )
+
+    # =====================================================
+    # BATCH
+    # =====================================================
 
     elif target.startswith(
         "batch:"
@@ -908,6 +1000,14 @@ async def deliver_target(
                     message_id=int(
                         row["message_id"]
                     ),
+                )
+
+                # -----------------------------------------
+                # DISABLE URL PREVIEW FOR USER
+                # -----------------------------------------
+                message = await disable_copied_message_preview(
+                    bot,
+                    message,
                 )
 
                 ids.append(
@@ -1132,12 +1232,6 @@ async def verify(
 
     # =====================================================
     # ANTI-BYPASS CHECK
-    #
-    # Token created when open_main() creates the shortener
-    # token.
-    #
-    # Less than 90 seconds = bypass
-    # 90 seconds or more = normal delivery
     # =====================================================
 
     age = db.get_token_age_seconds(
@@ -1155,13 +1249,11 @@ async def verify(
             age,
         )
 
-        # Auto-ban
         db.ban_user(
             uid,
             reason="Bypass Detected",
         )
 
-        # Invalidate token
         try:
             db.consume_token(
                 token,
@@ -1190,7 +1282,7 @@ async def verify(
     if not target:
         return await update.message.reply_text(
             "❌ ᴛʜɪꜱ ꜱʜᴏʀᴛᴇɴᴇʀ ʟɪɴᴋ "
-            "ɪs ᴇxᴘɪʀᴇᴅ ᴏʀ ᴀʟʀᴇᴀᴅʏ ᴜsᴇᴅ."
+            "ɪs ᴇxᴘɪʀᴇᴅ ᴏʀ ᴀʟʀᴇᴀᴅʏ ᴜꜱᴇᴅ."
         )
 
     await deliver_and_notify(
@@ -1252,9 +1344,6 @@ async def open_main(
 
     # =====================================================
     # CREATE TOKEN
-    #
-    # created_at is stored here.
-    # Anti-bypass timer starts from this point.
     # =====================================================
 
     tok = db.create_token(
@@ -1460,10 +1549,6 @@ async def callback(
     q = update.callback_query
 
     uid = q.from_user.id
-
-    # =====================================================
-    # BLOCK BANNED USERS FROM CALLBACKS TOO
-    # =====================================================
 
     if uid != OWNER_ID:
         try:
@@ -2507,7 +2592,6 @@ async def myplan(
 
 # =========================================================
 # PREMIUM LIST
-# ALWAYS IST
 # =========================================================
 
 async def list_premium(

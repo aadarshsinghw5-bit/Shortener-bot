@@ -7,6 +7,34 @@ from pymongo.collection import ReturnDocument
 
 
 class Database:
+    """
+    Dual-bot compatible MongoDB layer.
+
+    Shared between both bots:
+        - files
+        - batches
+        - batch_items
+        - banned_users
+        - premium
+        - main_links
+
+    Separate per bot:
+        - users
+        - admins
+        - settings
+        - fsub_channels
+        - broadcasts
+        - tokens
+
+    Set BOT_ID differently on each Render service, for example:
+        Bot 1: BOT_ID=bot1
+        Bot 2: BOT_ID=bot2
+
+    Existing legacy Bot-1 collections are migrated into the bot1 namespace
+    automatically when BOT_ID is "bot1" (or when the old collections are
+    detected and no scoped collection exists yet).
+    """
+
     def __init__(self):
         uri = os.environ.get("MONGO_URI", "").strip()
 
@@ -19,38 +47,60 @@ class Database:
         )
 
         db_name = (
-            os.environ.get(
-                "MONGO_DB",
-                "file_store_bot",
-            ).strip()
+            os.environ.get("MONGO_DB", "file_store_bot").strip()
             or "file_store_bot"
         )
 
         self.db = self.client[db_name]
 
-        self.users = self.db["users"]
+        # -------------------------------------------------
+        # BOT ID / NAMESPACE
+        # -------------------------------------------------
+        self.bot_id = (
+            os.environ.get("BOT_ID", "").strip().lower()
+            or "bot1"
+        )
+
+        # Keep the namespace Mongo-safe and predictable.
+        self.bot_id = "".join(
+            ch if (ch.isalnum() or ch in "_-") else "_"
+            for ch in self.bot_id
+        )[:64] or "bot1"
+
+        self.namespace = f"bot_{self.bot_id}"
+
+        # -------------------------------------------------
+        # SHARED COLLECTIONS
+        # -------------------------------------------------
         self.banned_users = self.db["banned_users"]
-        self.admins = self.db["admins"]
         self.premium = self.db["premium"]
-        self.settings = self.db["settings"]
+
         self.files = self.db["files"]
         self.batches = self.db["batches"]
         self.batch_items = self.db["batch_items"]
+
+        # Main links point to shared files/batches, so they are shared.
         self.main_links = self.db["main_links"]
-        self.tokens = self.db["tokens"]
-        self.fsub_channels = self.db["fsub_channels"]
-        self.broadcasts = self.db["broadcasts"]
 
-        self.users.create_index(
-            [("user_id", ASCENDING)],
-            unique=True,
-        )
+        # -------------------------------------------------
+        # BOT-SPECIFIC COLLECTIONS
+        # -------------------------------------------------
+        self.users = self.db[f"{self.namespace}_users"]
+        self.admins = self.db[f"{self.namespace}_admins"]
+        self.settings = self.db[f"{self.namespace}_settings"]
+        self.fsub_channels = self.db[f"{self.namespace}_fsub_channels"]
+        self.broadcasts = self.db[f"{self.namespace}_broadcasts"]
+        self.tokens = self.db[f"{self.namespace}_tokens"]
 
-        self.admins.create_index(
-            [("user_id", ASCENDING)],
-            unique=True,
-        )
+        self._ensure_indexes()
+        self._migrate_legacy_bot1_data()
 
+    # =====================================================
+    # INDEXES
+    # =====================================================
+
+    def _ensure_indexes(self):
+        # Shared
         self.banned_users.create_index(
             [("user_id", ASCENDING)],
             unique=True,
@@ -58,11 +108,6 @@ class Database:
 
         self.premium.create_index(
             [("user_id", ASCENDING)],
-            unique=True,
-        )
-
-        self.settings.create_index(
-            [("key", ASCENDING)],
             unique=True,
         )
 
@@ -97,8 +142,19 @@ class Database:
             unique=True,
         )
 
-        self.tokens.create_index(
-            [("token", ASCENDING)],
+        # Bot-specific
+        self.users.create_index(
+            [("user_id", ASCENDING)],
+            unique=True,
+        )
+
+        self.admins.create_index(
+            [("user_id", ASCENDING)],
+            unique=True,
+        )
+
+        self.settings.create_index(
+            [("key", ASCENDING)],
             unique=True,
         )
 
@@ -110,6 +166,125 @@ class Database:
         self.broadcasts.create_index(
             [("broadcast_id", ASCENDING)],
             unique=True,
+        )
+
+        self.tokens.create_index(
+            [("token", ASCENDING)],
+            unique=True,
+        )
+
+        self.tokens.create_index(
+            [
+                ("user_id", ASCENDING),
+                ("used", ASCENDING),
+            ],
+        )
+
+    # =====================================================
+    # LEGACY MIGRATION
+    # =====================================================
+
+    def _collection_exists(self, name):
+        try:
+            return name in self.db.list_collection_names()
+        except Exception:
+            return False
+
+    def _copy_legacy_collection(self, legacy_name, target_collection):
+        """
+        Copy legacy documents into the current bot namespace.
+
+        This is intentionally copy-only: legacy collections are NOT deleted.
+        If a document with the same natural key already exists, it is skipped.
+        """
+        if not self._collection_exists(legacy_name):
+            return
+
+        try:
+            source = self.db[legacy_name]
+
+            if target_collection.count_documents({}) > 0:
+                return
+
+            docs = list(source.find({}))
+            if not docs:
+                return
+
+            for doc in docs:
+                doc.pop("_id", None)
+
+                try:
+                    if legacy_name == "users":
+                        uid = int(doc["user_id"])
+                        target_collection.update_one(
+                            {"user_id": uid},
+                            {"$setOnInsert": doc},
+                            upsert=True,
+                        )
+
+                    elif legacy_name == "admins":
+                        uid = int(doc["user_id"])
+                        target_collection.update_one(
+                            {"user_id": uid},
+                            {"$setOnInsert": doc},
+                            upsert=True,
+                        )
+
+                    elif legacy_name == "settings":
+                        key = str(doc["key"])
+                        target_collection.update_one(
+                            {"key": key},
+                            {"$setOnInsert": doc},
+                            upsert=True,
+                        )
+
+                    elif legacy_name == "fsub_channels":
+                        cid = str(doc["channel_id"])
+                        target_collection.update_one(
+                            {"channel_id": cid},
+                            {"$setOnInsert": doc},
+                            upsert=True,
+                        )
+
+                    elif legacy_name == "broadcasts":
+                        bid = str(doc["broadcast_id"])
+                        target_collection.update_one(
+                            {"broadcast_id": bid},
+                            {"$setOnInsert": doc},
+                            upsert=True,
+                        )
+
+                except Exception:
+                    # One malformed legacy row must not stop startup.
+                    continue
+
+        except Exception:
+            # Migration is best-effort and never prevents the bot from booting.
+            pass
+
+    def _migrate_legacy_bot1_data(self):
+        """
+        The old project used unscoped collection names.
+
+        Bot 1 should continue seeing that data after the migration. Bot 2
+        starts with clean bot-specific collections.
+
+        Migration is enabled for the default bot1 namespace. Legacy collections
+        remain untouched so rollback is possible.
+        """
+        if self.bot_id != "bot1":
+            return
+
+        self._copy_legacy_collection("users", self.users)
+        self._copy_legacy_collection("admins", self.admins)
+        self._copy_legacy_collection("settings", self.settings)
+        self._copy_legacy_collection(
+            "fsub_channels",
+            self.fsub_channels,
+        )
+        self._copy_legacy_collection(
+            "broadcasts",
+            self.broadcasts,
         )
 
     # =====================================================
@@ -164,9 +339,7 @@ class Database:
             },
         )
 
-        return (
-            row or {}
-        ).get("timezone") or "Asia/Kolkata"
+        return (row or {}).get("timezone") or "Asia/Kolkata"
 
     def set_user_timezone(
         self,
@@ -195,15 +368,13 @@ class Database:
         )
 
     # =====================================================
-    # BAN SYSTEM
+    # BAN SYSTEM - SHARED
     # =====================================================
 
     def is_banned(self, user_id):
         return (
             self.banned_users.find_one(
-                {
-                    "user_id": int(user_id),
-                },
+                {"user_id": int(user_id)},
                 {"_id": 1},
             )
             is not None
@@ -215,16 +386,12 @@ class Database:
         reason="Manual Ban",
     ):
         self.banned_users.update_one(
-            {
-                "user_id": int(user_id),
-            },
+            {"user_id": int(user_id)},
             {
                 "$set": {
                     "user_id": int(user_id),
                     "reason": reason or "Manual Ban",
-                    "banned_at": datetime.now(
-                        timezone.utc
-                    ),
+                    "banned_at": datetime.now(timezone.utc),
                 }
             },
             upsert=True,
@@ -232,9 +399,7 @@ class Database:
 
     def unban_user(self, user_id):
         self.banned_users.delete_one(
-            {
-                "user_id": int(user_id),
-            }
+            {"user_id": int(user_id)}
         )
 
     def list_banned_users(self):
@@ -254,7 +419,7 @@ class Database:
         )
 
     # =====================================================
-    # ADMIN SYSTEM
+    # ADMIN SYSTEM - BOT SPECIFIC
     # =====================================================
 
     def add_admin(self, user_id):
@@ -274,24 +439,18 @@ class Database:
 
     def delete_user(self, user_id):
         self.users.delete_one(
-            {
-                "user_id": int(user_id),
-            }
+            {"user_id": int(user_id)}
         )
 
     def remove_admin(self, user_id):
         self.admins.delete_one(
-            {
-                "user_id": int(user_id),
-            }
+            {"user_id": int(user_id)}
         )
 
     def is_admin(self, user_id):
         return (
             self.admins.find_one(
-                {
-                    "user_id": int(user_id),
-                },
+                {"user_id": int(user_id)},
                 {"_id": 1},
             )
             is not None
@@ -321,21 +480,15 @@ class Database:
             out.append(
                 {
                     "user_id": uid,
-                    "username": info.get(
-                        "username",
-                        "",
-                    ),
-                    "first_name": info.get(
-                        "first_name",
-                        "",
-                    ),
+                    "username": info.get("username", ""),
+                    "first_name": info.get("first_name", ""),
                 }
             )
 
         return out
 
     # =====================================================
-    # PREMIUM SYSTEM
+    # PREMIUM SYSTEM - SHARED
     # =====================================================
 
     def add_premium(
@@ -344,34 +497,25 @@ class Database:
         days,
     ):
         user_id = int(user_id)
-
         now = datetime.now(timezone.utc)
 
         old = self.get_premium(user_id)
-
         base = now
 
         if old:
             try:
                 base = max(
                     now,
-                    self._dt(
-                        old["expires_at"]
-                    ),
+                    self._dt(old["expires_at"]),
                 )
             except Exception:
                 pass
 
         start = now
-
-        expiry = base + timedelta(
-            days=int(days)
-        )
+        expiry = base + timedelta(days=int(days))
 
         self.premium.update_one(
-            {
-                "user_id": user_id,
-            },
+            {"user_id": user_id},
             {
                 "$set": {
                     "starts_at": start,
@@ -387,18 +531,14 @@ class Database:
         old = self.get_premium(user_id)
 
         self.premium.delete_one(
-            {
-                "user_id": int(user_id),
-            }
+            {"user_id": int(user_id)}
         )
 
         return old
 
     def get_premium(self, user_id):
         row = self.premium.find_one(
-            {
-                "user_id": int(user_id),
-            },
+            {"user_id": int(user_id)},
             {"_id": 0},
         )
 
@@ -406,19 +546,12 @@ class Database:
             return None
 
         try:
-            expiry = self._dt(
-                row["expires_at"]
-            )
+            expiry = self._dt(row["expires_at"])
 
-            if expiry <= datetime.now(
-                timezone.utc
-            ):
+            if expiry <= datetime.now(timezone.utc):
                 self.premium.delete_one(
-                    {
-                        "user_id": int(user_id),
-                    }
+                    {"user_id": int(user_id)}
                 )
-
                 return None
 
         except Exception:
@@ -438,13 +571,10 @@ class Database:
         )
 
     def is_premium(self, user_id):
-        return (
-            self.get_premium(user_id)
-            is not None
-        )
+        return self.get_premium(user_id) is not None
 
     # =====================================================
-    # SETTINGS
+    # SETTINGS - BOT SPECIFIC
     # =====================================================
 
     def set_setting(
@@ -482,7 +612,7 @@ class Database:
         )
 
     # =====================================================
-    # FILE SYSTEM
+    # FILE SYSTEM - SHARED
     # =====================================================
 
     def add_file(
@@ -538,9 +668,7 @@ class Database:
 
     def get_file(self, file_id):
         return self.files.find_one(
-            {
-                "file_id": file_id,
-            },
+            {"file_id": file_id},
             {"_id": 0},
         )
 
@@ -555,12 +683,8 @@ class Database:
                 {
                     "channel_id": int(channel_id),
                     "message_id": {
-                        "$gte": int(
-                            first_message_id
-                        ),
-                        "$lte": int(
-                            last_message_id
-                        ),
+                        "$gte": int(first_message_id),
+                        "$lte": int(last_message_id),
                     },
                 },
                 {"_id": 0},
@@ -571,7 +695,7 @@ class Database:
         )
 
     # =====================================================
-    # BATCH SYSTEM
+    # BATCH SYSTEM - SHARED
     # =====================================================
 
     def create_batch(self, file_ids):
@@ -580,9 +704,7 @@ class Database:
         self.batches.insert_one(
             {
                 "batch_id": batch_id,
-                "created_at": datetime.now(
-                    timezone.utc
-                ),
+                "created_at": datetime.now(timezone.utc),
             }
         )
 
@@ -596,9 +718,7 @@ class Database:
         ]
 
         if rows:
-            self.batch_items.insert_many(
-                rows
-            )
+            self.batch_items.insert_many(rows)
 
         return batch_id
 
@@ -606,17 +726,13 @@ class Database:
         result = []
 
         for item in self.batch_items.find(
-            {
-                "batch_id": batch_id,
-            },
+            {"batch_id": batch_id},
             {"_id": 0},
         ).sort(
             "position",
             ASCENDING,
         ):
-            row = self.get_file(
-                item["file_id"]
-            )
+            row = self.get_file(item["file_id"])
 
             if row:
                 result.append(row)
@@ -624,7 +740,7 @@ class Database:
         return result
 
     # =====================================================
-    # MAIN LINKS
+    # MAIN LINKS - SHARED
     # =====================================================
 
     def create_main_link(self, target):
@@ -641,14 +757,12 @@ class Database:
 
     def get_main_link(self, token):
         return self.main_links.find_one(
-            {
-                "token": token,
-            },
+            {"token": token},
             {"_id": 0},
         )
 
     # =====================================================
-    # TOKEN SYSTEM
+    # TOKEN SYSTEM - BOT SPECIFIC
     # =====================================================
 
     def create_token(
@@ -659,13 +773,8 @@ class Database:
     ):
         token = uuid.uuid4().hex
 
-        now = datetime.now(
-            timezone.utc
-        )
-
-        expires = now + timedelta(
-            hours=hours
-        )
+        now = datetime.now(timezone.utc)
+        expires = now + timedelta(hours=hours)
 
         self.tokens.insert_one(
             {
@@ -675,6 +784,7 @@ class Database:
                 "created_at": now,
                 "expires_at": expires,
                 "used": False,
+                "bot_id": self.bot_id,
             }
         )
 
@@ -682,17 +792,13 @@ class Database:
 
     def get_token(self, token):
         return self.tokens.find_one(
-            {
-                "token": token,
-            },
+            {"token": token},
             {"_id": 0},
         )
 
     def get_token_age_seconds(self, token):
         row = self.tokens.find_one(
-            {
-                "token": token,
-            },
+            {"token": token},
             {
                 "_id": 0,
                 "created_at": 1,
@@ -702,27 +808,20 @@ class Database:
         if not row:
             return None
 
-        created_at = row.get(
-            "created_at"
-        )
+        created_at = row.get("created_at")
 
         if not created_at:
             return None
 
         try:
-            created_at = self._dt(
-                created_at
-            )
+            created_at = self._dt(created_at)
 
             age = (
                 datetime.now(timezone.utc)
                 - created_at
             ).total_seconds()
 
-            return max(
-                0.0,
-                age,
-            )
+            return max(0.0, age)
 
         except Exception:
             return None
@@ -737,20 +836,12 @@ class Database:
         if (
             not row
             or row.get("used")
-            or int(
-                row.get(
-                    "user_id",
-                    -1,
-                )
-            )
-            != int(user_id)
+            or int(row.get("user_id", -1)) != int(user_id)
         ):
             return None
 
         try:
-            if self._dt(
-                row["expires_at"]
-            ) <= datetime.now(
+            if self._dt(row["expires_at"]) <= datetime.now(
                 timezone.utc
             ):
                 return None
@@ -767,22 +858,16 @@ class Database:
             {
                 "$set": {
                     "used": True,
-                    "used_at": datetime.now(
-                        timezone.utc
-                    ),
+                    "used_at": datetime.now(timezone.utc),
                 }
             },
             return_document=ReturnDocument.AFTER,
         )
 
-        return (
-            row["target"]
-            if result
-            else None
-        )
+        return row["target"] if result else None
 
     # =====================================================
-    # FORCE SUBSCRIPTION
+    # FORCE SUBSCRIPTION - BOT SPECIFIC
     # =====================================================
 
     def add_fsub(
@@ -793,19 +878,12 @@ class Database:
     ):
         self.fsub_channels.update_one(
             {
-                "channel_id": str(
-                    channel_id
-                )
+                "channel_id": str(channel_id)
             },
             {
                 "$set": {
-                    "invite_link": (
-                        invite_link or ""
-                    ),
-                    "title": (
-                        title
-                        or str(channel_id)
-                    ),
+                    "invite_link": invite_link or "",
+                    "title": title or str(channel_id),
                 }
             },
             upsert=True,
@@ -813,11 +891,7 @@ class Database:
 
     def del_fsub(self, channel_id):
         self.fsub_channels.delete_one(
-            {
-                "channel_id": str(
-                    channel_id
-                )
-            }
+            {"channel_id": str(channel_id)}
         )
 
     def list_fsub(self):
@@ -832,7 +906,7 @@ class Database:
         )
 
     # =====================================================
-    # BROADCAST
+    # BROADCAST - BOT SPECIFIC
     # =====================================================
 
     def create_broadcast(
@@ -845,10 +919,9 @@ class Database:
         self.broadcasts.insert_one(
             {
                 "broadcast_id": bid,
-                "message_id": int(
-                    message_id
-                ),
+                "message_id": int(message_id),
                 "delete_at": delete_at,
+                "bot_id": self.bot_id,
             }
         )
 

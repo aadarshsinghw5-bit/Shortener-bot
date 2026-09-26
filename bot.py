@@ -1,11 +1,12 @@
 import os
 import logging
+import re
 import threading
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from html import escape
 from urllib.parse import quote
+from html import escape
 
 from dotenv import load_dotenv
 
@@ -13,15 +14,19 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputMediaPhoto,
     LinkPreviewOptions,
 )
+
 from telegram.constants import ChatMemberStatus
+
 from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
     ContextTypes,
+    ApplicationHandlerStop,
     filters,
 )
 
@@ -30,53 +35,64 @@ from shortener import Shortener
 
 
 # =========================================================
-# CONFIG
+# BASIC CONFIG
 # =========================================================
 
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-BOT_USERNAME = os.getenv("BOT_USERNAME", "").strip().lstrip("@")
-OWNER_ID = int(os.getenv("OWNER_ID", "0"))
-DB_CHANNEL_ID = int(os.getenv("DB_CHANNEL_ID", "0"))
-
-PORT = int(os.getenv("PORT", "10000"))
-
-IST = ZoneInfo("Asia/Kolkata")
-
-BYPASS_MIN_SECONDS = 90
-
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is not configured")
-
-if not BOT_USERNAME:
-    raise RuntimeError("BOT_USERNAME is not configured")
-
-if not OWNER_ID:
-    raise RuntimeError("OWNER_ID is not configured")
-
-if not DB_CHANNEL_ID:
-    raise RuntimeError("DB_CHANNEL_ID is not configured")
-
-
-# =========================================================
-# DATABASE
-# =========================================================
-
-db = Database()
-shortener = Shortener(db)
-
-
-# =========================================================
-# LOGGING
-# =========================================================
-
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO,
 )
 
-logger = logging.getLogger("file-store-bot")
+log = logging.getLogger(
+    "file-store-bot"
+)
+
+for name in (
+    "httpx",
+    "httpcore",
+    "telegram",
+    "telegram.ext",
+):
+    logging.getLogger(
+        name
+    ).setLevel(
+        logging.WARNING
+    )
+
+
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+
+BOT_USERNAME = os.environ[
+    "BOT_USERNAME"
+].lstrip("@")
+
+OWNER_ID = int(
+    os.environ["OWNER_ID"]
+)
+
+DB_CHANNEL_ID = int(
+    os.environ["DB_CHANNEL_ID"]
+)
+
+IST = ZoneInfo(
+    "Asia/Kolkata"
+)
+
+
+# =========================================================
+# ANTI-BYPASS
+# =========================================================
+
+BYPASS_MIN_SECONDS = 90
+
+
+db = Database()
+
+shortener = Shortener(
+    db
+)
 
 
 # =========================================================
@@ -84,8 +100,11 @@ logger = logging.getLogger("file-store-bot")
 # =========================================================
 
 _pending_image = set()
+
 _pending_autodelete = set()
+
 _pending_admin = set()
+
 _pending_fsub = set()
 
 
@@ -93,2339 +112,69 @@ _pending_fsub = set()
 # HEALTH SERVER
 # =========================================================
 
-class HealthHandler(BaseHTTPRequestHandler):
+class HealthHandler(
+    BaseHTTPRequestHandler
+):
 
     def do_GET(self):
-        body = b'{"ok":true,"service":"telegram-file-store-bot"}'
-
         self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
 
-    def log_message(self, format, *args):
-        return
+        self.send_header(
+            "Content-Type",
+            "application/json",
+        )
+
+        self.end_headers()
+
+        self.wfile.write(
+            b'{"ok":true,"service":"telegram-file-store-bot"}'
+        )
+
+    def do_HEAD(self):
+        self.send_response(200)
+
+        self.send_header(
+            "Content-Type",
+            "application/json",
+        )
+
+        self.send_header(
+            "Content-Length",
+            "49",
+        )
+
+        self.end_headers()
+
+    def log_message(
+        self,
+        format,
+        *args,
+    ):
+        pass
 
 
 def start_health_server():
+    port = int(
+        os.environ.get(
+            "PORT",
+            "10000",
+        )
+    )
+
     server = HTTPServer(
-        ("0.0.0.0", PORT),
+        (
+            "0.0.0.0",
+            port,
+        ),
         HealthHandler,
     )
 
-    logger.info("Health server started on port %s", PORT)
+    log.info(
+        "Health server running on port %s",
+        port,
+    )
+
     server.serve_forever()
-
-
-# =========================================================
-# HELPERS
-# =========================================================
-
-def now_utc():
-    return datetime.now(timezone.utc)
-
-
-def format_dt(dt, tz_name="Asia/Kolkata"):
-    if not dt:
-        return "N/A"
-
-    try:
-        if isinstance(dt, str):
-            dt = datetime.fromisoformat(
-                dt.replace("Z", "+00:00")
-            )
-
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-
-        tz = ZoneInfo(tz_name)
-        return dt.astimezone(tz).strftime(
-            "%d %b %Y, %I:%M %p"
-        )
-
-    except Exception:
-        return str(dt)
-
-
-def get_user_tz(user_id):
-    try:
-        return db.get_user_timezone(user_id)
-    except Exception:
-        return "Asia/Kolkata"
-
-
-def is_owner(user_id):
-    return int(user_id) == OWNER_ID
-
-
-def is_admin(user_id):
-    try:
-        return is_owner(user_id) or db.is_admin(user_id)
-    except Exception:
-        return is_owner(user_id)
-
-
-def is_mod(user_id):
-    """
-    Compatible with a database.py that may provide a mod system.
-    If no mod methods exist, returns False.
-    """
-    try:
-        method = getattr(db, "is_mod", None)
-
-        if method:
-            return bool(method(user_id))
-
-    except Exception:
-        pass
-
-    return False
-
-
-def can_genlink(user_id):
-    return (
-        is_owner(user_id)
-        or is_admin(user_id)
-        or is_mod(user_id)
-    )
-
-
-def main_link_url(token):
-    return f"https://t.me/{BOT_USERNAME}?start=link_{token}"
-
-
-def share_url(url):
-    return (
-        "https://t.me/share/url?"
-        f"url={quote(url, safe='')}"
-    )
-
-
-def mention_user(user_id, name):
-    return (
-        f'<a href="tg://user?id={int(user_id)}">'
-        f'{escape(name or "User")}'
-        f'</a>'
-    )
-
-
-def display_user(row):
-    uid = int(row.get("user_id", 0))
-    username = row.get("username") or ""
-    first_name = row.get("first_name") or "User"
-
-    name = first_name
-
-    if username:
-        name = f"@{username}"
-
-    return mention_user(uid, name)
-
-
-def link_preview_disabled():
-    return LinkPreviewOptions(
-        is_disabled=True
-    )
-
-
-# =========================================================
-# START UI
-# =========================================================
-
-def start_caption():
-    return (
-        "<b>Hi There....! 💥</b>\n\n"
-        "This is a <b>File Store Bot</b>.\n"
-        "Generate and access your files through secure links.\n\n"
-        "Owner: <a href=\"tg://user?id=0\">@Its_Lozo</a>"
-    )
-
-
-def start_keyboard():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "ABOUT",
-                callback_data="about",
-            ),
-            InlineKeyboardButton(
-                "CLOSE",
-                callback_data="close",
-            ),
-        ]
-    ])
-
-
-def about_caption():
-    return (
-        "<b>ABOUT</b>\n\n"
-        "Made for: "
-        '<a href="https://t.me/Anime_Hub_94">'
-        "Anime Hub"
-        "</a>\n\n"
-        "Owner: "
-        '<a href="tg://user?id=0">@Its_Lozo</a>\n'
-        "Developer: "
-        '<a href="tg://user?id=0">@Its_Lozo</a>'
-    )
-
-
-def about_keyboard():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "BACK",
-                callback_data="back_start",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "CLOSE",
-                callback_data="close",
-            )
-        ],
-    ])
-
-
-# =========================================================
-# F-SUB
-# =========================================================
-
-async def get_fsub_status(bot, user_id):
-    joined = []
-    missing = []
-
-    rows = db.list_fsub()
-
-    for row in rows:
-        channel_id = row.get("channel_id")
-        title = row.get("title") or str(channel_id)
-        invite = row.get("invite_link") or ""
-
-        try:
-            member = await bot.get_chat_member(
-                chat_id=int(channel_id),
-                user_id=int(user_id),
-            )
-
-            if member.status in (
-                ChatMemberStatus.LEFT,
-                ChatMemberStatus.BANNED,
-            ):
-                missing.append(row)
-            else:
-                joined.append(row)
-
-        except Exception:
-            missing.append(row)
-
-    return joined, missing
-
-
-def fsub_text(joined, missing):
-    text = "<b>⚠️ Join Required Channels</b>\n\n"
-
-    if joined:
-        text += "<b>Joined:</b>\n"
-
-        for row in joined:
-            title = escape(
-                row.get("title")
-                or str(row.get("channel_id"))
-            )
-
-            text += f"✅ {title} — <b>JOINED</b>\n"
-
-        text += "\n"
-
-    if missing:
-        text += "<b>Pending:</b>\n"
-
-        for row in missing:
-            title = escape(
-                row.get("title")
-                or str(row.get("channel_id"))
-            )
-
-            text += f"❌ {title}\n"
-
-        text += "\nJoin all pending channels and press CHECK."
-
-    return text
-
-
-def fsub_keyboard(missing):
-    buttons = []
-
-    for row in missing:
-        title = row.get("title") or "JOIN CHANNEL"
-        invite = row.get("invite_link")
-
-        if invite:
-            buttons.append([
-                InlineKeyboardButton(
-                    f"JOIN {title}",
-                    url=invite,
-                )
-            ])
-
-    if missing:
-        buttons.append([
-            InlineKeyboardButton(
-                "✅ CHECK",
-                callback_data="check_fsub",
-            )
-        ])
-
-    return InlineKeyboardMarkup(buttons)
-
-
-async def ensure_fsub(bot, user_id):
-    joined, missing = await get_fsub_status(
-        bot,
-        user_id,
-    )
-
-    if not missing:
-        return True, joined, missing
-
-    return False, joined, missing
-
-
-# =========================================================
-# DELIVERY
-# =========================================================
-
-async def delete_later(
-    context,
-    chat_id,
-    message_id,
-    delay,
-):
-    await context.bot.delete_message(
-        chat_id=chat_id,
-        message_id=message_id,
-    )
-
-
-async def deliver_target(
-    bot,
-    user_id,
-    target,
-):
-    if not target:
-        raise ValueError("Invalid target")
-
-    if target.startswith("message:"):
-        parts = target.split(":")
-
-        if len(parts) != 3:
-            raise ValueError("Invalid message target")
-
-        channel_id = int(parts[1])
-        message_id = int(parts[2])
-
-        return await bot.copy_message(
-            chat_id=user_id,
-            from_chat_id=channel_id,
-            message_id=message_id,
-        )
-
-    if target.startswith("batch:"):
-        batch_id = target.split(":", 1)[1]
-
-        rows = db.get_batch_items(batch_id)
-
-        if not rows:
-            raise ValueError("Batch is empty")
-
-        sent = []
-
-        for row in rows:
-            msg = await bot.copy_message(
-                chat_id=user_id,
-                from_chat_id=int(row["channel_id"]),
-                message_id=int(row["message_id"]),
-            )
-
-            sent.append(msg)
-
-        return sent
-
-    raise ValueError("Unknown target")
-
-
-async def deliver_and_notify(
-    update,
-    context,
-    target,
-):
-    user_id = update.effective_user.id
-
-    # Placeholder
-    wait_msg = None
-
-    try:
-        wait_msg = await context.bot.send_message(
-            chat_id=user_id,
-            text="Please Wait.....",
-            link_preview_options=link_preview_disabled(),
-        )
-
-        sent = await deliver_target(
-            context.bot,
-            user_id,
-            target,
-        )
-
-        try:
-            minutes = int(
-                db.get_setting(
-                    "auto_delete_minutes",
-                    "10",
-                )
-            )
-        except Exception:
-            minutes = 10
-
-        notice = await context.bot.send_message(
-            chat_id=user_id,
-            text=(
-                f"This File is deleting automatically in "
-                f"{minutes} minutes. "
-                "Forward in your Saved Messages..!"
-            ),
-            link_preview_options=link_preview_disabled(),
-        )
-
-        if isinstance(sent, list):
-            messages = sent
-        else:
-            messages = [sent]
-
-        delay = max(
-            1,
-            minutes * 60,
-        )
-
-        for msg in messages:
-            context.job_queue.run_once(
-                delete_job,
-                delay,
-                data={
-                    "chat_id": user_id,
-                    "message_id": msg.message_id,
-                },
-            )
-
-        context.job_queue.run_once(
-            delete_job,
-            delay,
-            data={
-                "chat_id": user_id,
-                "message_id": notice.message_id,
-            },
-        )
-
-        return sent
-
-    finally:
-        if wait_msg:
-            try:
-                await wait_msg.delete()
-            except Exception:
-                pass
-
-
-async def delete_job(context):
-    data = context.job.data
-
-    try:
-        await context.bot.delete_message(
-            chat_id=data["chat_id"],
-            message_id=data["message_id"],
-        )
-    except Exception:
-        pass
-
-
-# =========================================================
-# DOWNLOAD PAGE
-# =========================================================
-
-async def send_download_page(
-    update,
-    context,
-    short_url,
-):
-    image = db.get_setting(
-        "start_image",
-        "",
-    )
-
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "📥 DOWNLOAD",
-                url=short_url,
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "⭐ PREMIUM",
-                callback_data="premium_info",
-            ),
-            InlineKeyboardButton(
-                "📖 TUTORIAL",
-                callback_data="tutorial",
-            ),
-        ],
-    ])
-
-    caption = (
-        "<b>🔐 Secure Download</b>\n\n"
-        "Your file is ready.\n"
-        "Complete the verification to continue."
-    )
-
-    if image:
-        try:
-            await context.bot.send_photo(
-                chat_id=update.effective_user.id,
-                photo=image,
-                caption=caption,
-                reply_markup=keyboard,
-            )
-            return
-        except Exception:
-            pass
-
-    await context.bot.send_message(
-        chat_id=update.effective_user.id,
-        text=caption,
-        reply_markup=keyboard,
-        link_preview_options=link_preview_disabled(),
-    )
-
-
-# =========================================================
-# TOKEN VERIFICATION
-# =========================================================
-
-async def verify_token(
-    update,
-    context,
-    token,
-):
-    user_id = update.effective_user.id
-
-    if db.is_banned(user_id):
-        await update.message.reply_text(
-            "🚫 You are banned from using this bot."
-        )
-        return
-
-    row = db.get_token(token)
-
-    if not row:
-        await update.message.reply_text(
-            "❌ Invalid or expired verification link."
-        )
-        return
-
-    if int(row.get("user_id", -1)) != int(user_id):
-        await update.message.reply_text(
-            "❌ This verification link belongs to another user."
-        )
-        return
-
-    if row.get("used"):
-        await update.message.reply_text(
-            "❌ This verification link has already been used."
-        )
-        return
-
-    try:
-        expires = row.get("expires_at")
-
-        if isinstance(expires, str):
-            expires = datetime.fromisoformat(
-                expires.replace("Z", "+00:00")
-            )
-
-        if expires.tzinfo is None:
-            expires = expires.replace(
-                tzinfo=timezone.utc
-            )
-
-        if expires <= now_utc():
-            await update.message.reply_text(
-                "❌ Verification link expired."
-            )
-            return
-
-    except Exception:
-        await update.message.reply_text(
-            "❌ Invalid verification link."
-        )
-        return
-
-    ok, joined, missing = await ensure_fsub(
-        context.bot,
-        user_id,
-    )
-
-    if not ok:
-        await update.message.reply_text(
-            fsub_text(joined, missing),
-            reply_markup=fsub_keyboard(missing),
-        )
-        return
-
-    age = db.get_token_age_seconds(token)
-
-    if (
-        age is not None
-        and age < BYPASS_MIN_SECONDS
-        and not is_owner(user_id)
-    ):
-        db.ban_user(
-            user_id,
-            reason="Bypass Detected",
-        )
-
-        db.consume_token(
-            token,
-            user_id,
-        )
-
-        await update.message.reply_text(
-            "🚫 Verification bypass detected.\n"
-            "You have been banned."
-        )
-        return
-
-    target = db.consume_token(
-        token,
-        user_id,
-    )
-
-    if not target:
-        await update.message.reply_text(
-            "❌ Verification link is no longer valid."
-        )
-        return
-
-    try:
-        await deliver_and_notify(
-            update,
-            context,
-            target,
-        )
-
-    except Exception as exc:
-        logger.exception(
-            "Delivery failed: %s",
-            exc,
-        )
-
-        await update.message.reply_text(
-            "❌ Unable to deliver the file right now."
-        )
-
-
-# =========================================================
-# OPEN MAIN LINK
-# =========================================================
-
-async def open_main(
-    update,
-    context,
-    main_token,
-):
-    user_id = update.effective_user.id
-
-    row = db.get_main_link(main_token)
-
-    if not row:
-        await update.message.reply_text(
-            "❌ Invalid or expired link."
-        )
-        return
-
-    if db.is_banned(user_id):
-        await update.message.reply_text(
-            "🚫 You are banned from using this bot."
-        )
-        return
-
-    ok, joined, missing = await ensure_fsub(
-        context.bot,
-        user_id,
-    )
-
-    if not ok:
-        await update.message.reply_text(
-            fsub_text(joined, missing),
-            reply_markup=fsub_keyboard(missing),
-        )
-        return
-
-    target = row.get("target")
-
-    if not target:
-        await update.message.reply_text(
-            "❌ File target not found."
-        )
-        return
-
-    # Owner and premium users get direct delivery.
-    if (
-        is_owner(user_id)
-        or db.is_premium(user_id)
-    ):
-        try:
-            await deliver_and_notify(
-                update,
-                context,
-                target,
-            )
-        except Exception:
-            logger.exception(
-                "Direct delivery failed"
-            )
-
-            await update.message.reply_text(
-                "❌ Unable to deliver the file."
-            )
-
-        return
-
-    try:
-        token = db.create_token(
-            user_id,
-            target,
-            2,
-        )
-
-        short_url = shortener.create_from_token(
-            token,
-            BOT_USERNAME,
-        )
-
-        if not short_url:
-            raise ValueError(
-                "Shortener returned empty URL"
-            )
-
-        await send_download_page(
-            update,
-            context,
-            short_url,
-        )
-
-    except Exception as exc:
-        logger.exception(
-            "Shortener/gateway error: %s",
-            exc,
-        )
-
-        await update.message.reply_text(
-            "❌ Unable to create the download link."
-        )
-
-
-# =========================================================
-# START
-# =========================================================
-
-async def start_command(
-    update,
-    context,
-):
-    user = update.effective_user
-
-    db.add_user(
-        user.id,
-        user.username or "",
-        user.first_name or "",
-    )
-
-    if db.is_banned(user.id):
-        await update.message.reply_text(
-            "🚫 You are banned from using this bot."
-        )
-        return
-
-    args = context.args
-
-    if args:
-        arg = args[0]
-
-        if arg.startswith("verify_"):
-            await verify_token(
-                update,
-                context,
-                arg[7:],
-            )
-            return
-
-        if arg.startswith("link_"):
-            await open_main(
-                update,
-                context,
-                arg[5:],
-            )
-            return
-
-    ok, joined, missing = await ensure_fsub(
-        context.bot,
-        user.id,
-    )
-
-    if not ok:
-        await update.message.reply_text(
-            fsub_text(joined, missing),
-            reply_markup=fsub_keyboard(missing),
-        )
-        return
-
-    image = db.get_setting(
-        "start_image",
-        "",
-    )
-
-    if image:
-        try:
-            await update.message.reply_photo(
-                photo=image,
-                caption=start_caption(),
-                reply_markup=start_keyboard(),
-            )
-            return
-        except Exception:
-            pass
-
-    await update.message.reply_text(
-        start_caption(),
-        reply_markup=start_keyboard(),
-        link_preview_options=link_preview_disabled(),
-    )
-
-
-# =========================================================
-# GENLINK
-# =========================================================
-
-async def genlink_command(
-    update,
-    context,
-):
-    user_id = update.effective_user.id
-
-    if not can_genlink(user_id):
-        await update.message.reply_text(
-            "❌ You are not allowed to use this command."
-        )
-        return
-
-    if not update.message.reply_to_message:
-        await update.message.reply_text(
-            "Reply to any message/file and use /genlink."
-        )
-        return
-
-    source = update.message.reply_to_message
-
-    try:
-        copied = await context.bot.copy_message(
-            chat_id=DB_CHANNEL_ID,
-            from_chat_id=source.chat_id,
-            message_id=source.message_id,
-        )
-
-        file_id = db.add_file(
-            DB_CHANNEL_ID,
-            copied.message_id,
-            source.caption or "",
-        )
-
-        target = (
-            f"message:{DB_CHANNEL_ID}:"
-            f"{copied.message_id}"
-        )
-
-        token = db.create_main_link(
-            target
-        )
-
-        url = main_link_url(token)
-
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "🔗 OPEN LINK",
-                    url=url,
-                ),
-                InlineKeyboardButton(
-                    "📤 SHARE",
-                    url=share_url(url),
-                ),
-            ]
-        ])
-
-        sent = await update.message.reply_text(
-            "<b>✅ Link Generated</b>\n\n"
-            f"<code>{escape(url)}</code>",
-            reply_markup=keyboard,
-            link_preview_options=link_preview_disabled(),
-        )
-
-        # Remove the command message.
-        try:
-            await update.message.delete()
-        except Exception:
-            pass
-
-        # Keep generated link for a reasonable time.
-        context.job_queue.run_once(
-            delete_job,
-            300,
-            data={
-                "chat_id": sent.chat_id,
-                "message_id": sent.message_id,
-            },
-        )
-
-    except Exception as exc:
-        logger.exception(
-            "genlink error: %s",
-            exc,
-        )
-
-        await update.message.reply_text(
-            "❌ Failed to generate link."
-        )
-
-
-# =========================================================
-# BATCH
-# =========================================================
-
-def parse_telegram_message_link(url):
-    url = url.strip()
-
-    if not url.startswith("http"):
-        return None
-
-    parts = url.rstrip("/").split("/")
-
-    if len(parts) < 2:
-        return None
-
-    try:
-        message_id = int(parts[-1])
-    except Exception:
-        return None
-
-    # https://t.me/c/123456789/100
-    if "t.me/c/" in url:
-        try:
-            internal_id = int(parts[-2])
-            chat_id = int(
-                f"-100{internal_id}"
-            )
-
-            return chat_id, message_id
-        except Exception:
-            return None
-
-    # https://t.me/channel/100
-    if "t.me/" in url:
-        username = parts[-2]
-
-        if username in (
-            "c",
-            "share",
-        ):
-            return None
-
-        return f"@{username}", message_id
-
-    return None
-
-
-async def resolve_channel_id(
-    bot,
-    value,
-):
-    if isinstance(value, int):
-        return value
-
-    chat = await bot.get_chat(value)
-
-    return chat.id
-
-
-async def batch_command(
-    update,
-    context,
-):
-    user_id = update.effective_user.id
-
-    if not can_genlink(user_id):
-        await update.message.reply_text(
-            "❌ You are not allowed to use this command."
-        )
-        return
-
-    if len(context.args) != 2:
-        await update.message.reply_text(
-            "Usage:\n"
-            "/batch FIRST_LINK LAST_LINK"
-        )
-        return
-
-    first = parse_telegram_message_link(
-        context.args[0]
-    )
-
-    last = parse_telegram_message_link(
-        context.args[1]
-    )
-
-    if not first or not last:
-        await update.message.reply_text(
-            "❌ Invalid Telegram message links."
-        )
-        return
-
-    try:
-        first_chat = await resolve_channel_id(
-            context.bot,
-            first[0],
-        )
-
-        last_chat = await resolve_channel_id(
-            context.bot,
-            last[0],
-        )
-
-        if first_chat != last_chat:
-            await update.message.reply_text(
-                "❌ Both links must belong to the same channel."
-            )
-            return
-
-        if first_chat != DB_CHANNEL_ID:
-            await update.message.reply_text(
-                "❌ Batch links must be from the database channel."
-            )
-            return
-
-        lo = min(
-            first[1],
-            last[1],
-        )
-
-        hi = max(
-            first[1],
-            last[1],
-        )
-
-        rows = db.list_files_between(
-            DB_CHANNEL_ID,
-            lo,
-            hi,
-        )
-
-        if not rows:
-            await update.message.reply_text(
-                "❌ No files/posts found in this range."
-            )
-            return
-
-        file_ids = [
-            row["file_id"]
-            for row in rows
-        ]
-
-        batch_id = db.create_batch(
-            file_ids
-        )
-
-        target = f"batch:{batch_id}"
-
-        token = db.create_main_link(
-            target
-        )
-
-        url = main_link_url(token)
-
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "🔗 OPEN BATCH",
-                    url=url,
-                ),
-                InlineKeyboardButton(
-                    "📤 SHARE",
-                    url=share_url(url),
-                ),
-            ]
-        ])
-
-        sent = await update.message.reply_text(
-            "<b>✅ Batch Link Generated</b>\n\n"
-            f"Files: <b>{len(rows)}</b>\n\n"
-            f"<code>{escape(url)}</code>",
-            reply_markup=keyboard,
-            link_preview_options=link_preview_disabled(),
-        )
-
-        context.job_queue.run_once(
-            delete_job,
-            300,
-            data={
-                "chat_id": sent.chat_id,
-                "message_id": sent.message_id,
-            },
-        )
-
-    except Exception as exc:
-        logger.exception(
-            "batch error: %s",
-            exc,
-        )
-
-        await update.message.reply_text(
-            "❌ Failed to create batch."
-        )
-
-
-# =========================================================
-# SETTINGS
-# =========================================================
-
-def settings_keyboard():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "🖼 SET IMAGE",
-                callback_data="set_image",
-            ),
-            InlineKeyboardButton(
-                "⏱ AUTO DELETE",
-                callback_data="set_autodelete",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "👤 ADMINS",
-                callback_data="admins",
-            ),
-            InlineKeyboardButton(
-                "📢 F-SUB",
-                callback_data="fsub",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "❌ CLOSE",
-                callback_data="close",
-            )
-        ],
-    ])
-
-
-async def settings_command(
-    update,
-    context,
-):
-    if not is_admin(
-        update.effective_user.id
-    ):
-        await update.message.reply_text(
-            "❌ Owner/Admin only."
-        )
-        return
-
-    image = db.get_setting(
-        "start_image",
-        "Not set",
-    )
-
-    auto_delete = db.get_setting(
-        "auto_delete_minutes",
-        "10",
-    )
-
-    await update.message.reply_text(
-        "<b>⚙️ Bot Settings</b>\n\n"
-        f"Start Image: {'Set' if image else 'Not set'}\n"
-        f"Auto Delete: <b>{auto_delete} minutes</b>",
-        reply_markup=settings_keyboard(),
-    )
-
-
-# =========================================================
-# BAN COMMANDS
-# =========================================================
-
-async def banuser_command(
-    update,
-    context,
-):
-    if not is_admin(
-        update.effective_user.id
-    ):
-        return
-
-    if not context.args:
-        await update.message.reply_text(
-            "Usage: /banuser USER_ID"
-        )
-        return
-
-    try:
-        uid = int(context.args[0])
-    except Exception:
-        await update.message.reply_text(
-            "❌ Invalid user ID."
-        )
-        return
-
-    if uid == OWNER_ID:
-        await update.message.reply_text(
-            "❌ Owner cannot be banned."
-        )
-        return
-
-    reason = (
-        " ".join(context.args[1:])
-        if len(context.args) > 1
-        else "Manual Ban"
-    )
-
-    db.ban_user(
-        uid,
-        reason=reason,
-    )
-
-    await update.message.reply_text(
-        f"🚫 User <code>{uid}</code> banned.",
-        parse_mode="HTML",
-    )
-
-
-async def unbanuser_command(
-    update,
-    context,
-):
-    if not is_admin(
-        update.effective_user.id
-    ):
-        return
-
-    if not context.args:
-        await update.message.reply_text(
-            "Usage: /unbanuser USER_ID"
-        )
-        return
-
-    try:
-        uid = int(context.args[0])
-    except Exception:
-        await update.message.reply_text(
-            "❌ Invalid user ID."
-        )
-        return
-
-    db.unban_user(uid)
-
-    await update.message.reply_text(
-        f"✅ User <code>{uid}</code> unbanned.",
-        parse_mode="HTML",
-    )
-
-
-async def banuser_list_command(
-    update,
-    context,
-):
-    if not is_admin(
-        update.effective_user.id
-    ):
-        return
-
-    rows = db.list_banned_users()
-
-    if not rows:
-        await update.message.reply_text(
-            "No banned users."
-        )
-        return
-
-    text = "<b>🚫 Banned Users</b>\n\n"
-
-    for row in rows:
-        uid = row.get("user_id")
-        reason = escape(
-            row.get("reason")
-            or "Manual Ban"
-        )
-
-        text += (
-            f"• <code>{uid}</code> — "
-            f"{reason}\n"
-        )
-
-    await update.message.reply_text(
-        text,
-        parse_mode="HTML",
-    )
-
-
-# =========================================================
-# PREMIUM
-# =========================================================
-
-async def addsubs_command(
-    update,
-    context,
-):
-    if not is_admin(
-        update.effective_user.id
-    ):
-        return
-
-    if len(context.args) != 2:
-        await update.message.reply_text(
-            "Usage: /addsubs USER_ID DAYS"
-        )
-        return
-
-    try:
-        uid = int(context.args[0])
-        days = int(context.args[1])
-
-        start, expiry = db.add_premium(
-            uid,
-            days,
-        )
-
-        await update.message.reply_text(
-            "✅ Premium added.\n\n"
-            f"User: <code>{uid}</code>\n"
-            f"Days: <b>{days}</b>\n"
-            f"Expires: <b>{format_dt(expiry)}</b>",
-            parse_mode="HTML",
-        )
-
-    except Exception:
-        await update.message.reply_text(
-            "❌ Invalid values."
-        )
-
-
-async def removesubs_command(
-    update,
-    context,
-):
-    if not is_admin(
-        update.effective_user.id
-    ):
-        return
-
-    if not context.args:
-        await update.message.reply_text(
-            "Usage: /removesubs USER_ID"
-        )
-        return
-
-    try:
-        uid = int(context.args[0])
-    except Exception:
-        await update.message.reply_text(
-            "❌ Invalid user ID."
-        )
-        return
-
-    old = db.remove_premium(uid)
-
-    if old:
-        await update.message.reply_text(
-            f"✅ Premium removed from <code>{uid}</code>.",
-            parse_mode="HTML",
-        )
-    else:
-        await update.message.reply_text(
-            "❌ Premium subscription not found."
-        )
-
-
-async def myplan_command(
-    update,
-    context,
-):
-    uid = update.effective_user.id
-
-    premium = db.get_premium(uid)
-
-    if not premium:
-        await update.message.reply_text(
-            "You don't have an active premium plan."
-        )
-        return
-
-    tz = get_user_tz(uid)
-
-    await update.message.reply_text(
-        "<b>⭐ Your Premium Plan</b>\n\n"
-        f"Started: <b>{format_dt(premium.get('starts_at'), tz)}</b>\n"
-        f"Expires: <b>{format_dt(premium.get('expires_at'), tz)}</b>\n"
-        f"Timezone: <b>{tz}</b>",
-        parse_mode="HTML",
-    )
-
-
-async def list_premium_command(
-    update,
-    context,
-):
-    if not is_admin(
-        update.effective_user.id
-    ):
-        return
-
-    rows = db.list_premium()
-
-    if not rows:
-        await update.message.reply_text(
-            "No active premium users."
-        )
-        return
-
-    text = "<b>⭐ Premium Users</b>\n\n"
-
-    for row in rows:
-        uid = int(row["user_id"])
-
-        text += (
-            f"• <code>{uid}</code>\n"
-            f"  Expires: "
-            f"{format_dt(row.get('expires_at'), 'Asia/Kolkata')}\n\n"
-        )
-
-    await update.message.reply_text(
-        text,
-        parse_mode="HTML",
-    )
-
-
-# =========================================================
-# USERS
-# =========================================================
-
-async def users_command(
-    update,
-    context,
-):
-    if not is_admin(
-        update.effective_user.id
-    ):
-        return
-
-    rows = db.list_users()
-
-    if not rows:
-        await update.message.reply_text(
-            "No users found."
-        )
-        return
-
-    text = (
-        f"<b>👥 Users: {len(rows)}</b>\n\n"
-    )
-
-    for row in rows:
-        uid = int(row["user_id"])
-        name = row.get("first_name") or "User"
-        username = row.get("username") or ""
-
-        text += (
-            f"{mention_user(uid, name)}\n"
-            f"Username: "
-            f"{('@' + username) if username else 'N/A'}\n"
-            f"ID: <code>{uid}</code>\n\n"
-        )
-
-    # Telegram has message size limits.
-    chunks = []
-
-    current = ""
-
-    for line in text.splitlines(True):
-        if len(current) + len(line) > 3800:
-            chunks.append(current)
-            current = ""
-
-        current += line
-
-    if current:
-        chunks.append(current)
-
-    for chunk in chunks:
-        await update.message.reply_text(
-            chunk,
-            parse_mode="HTML",
-        )
-
-
-# =========================================================
-# ADMIN MANAGEMENT
-# =========================================================
-
-async def show_admins(
-    query,
-):
-    admins = db.list_admins()
-
-    text = "<b>👤 Admins</b>\n\n"
-
-    owner_name = (
-        '<a href="tg://user?id=0">'
-        "@Its_Lozo"
-        "</a>"
-    )
-
-    text += f"👑 Owner: {owner_name}\n"
-    text += f"ID: <code>{OWNER_ID}</code>\n\n"
-
-    if admins:
-        for row in admins:
-            uid = int(row["user_id"])
-            name = row.get("first_name") or "Admin"
-            username = row.get("username") or ""
-
-            text += (
-                f"{mention_user(uid, name)}"
-                f"{(' @' + username) if username else ''}\n"
-                f"ID: <code>{uid}</code>\n\n"
-            )
-    else:
-        text += "No admins added.\n"
-
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "➕ ADD ADMIN",
-                callback_data="add_admin",
-            ),
-            InlineKeyboardButton(
-                "➖ REMOVE ADMIN",
-                callback_data="remove_admin",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "BACK",
-                callback_data="settings",
-            )
-        ],
-    ])
-
-    await query.edit_message_text(
-        text,
-        reply_markup=keyboard,
-        parse_mode="HTML",
-        link_preview_options=link_preview_disabled(),
-    )
-
-
-# =========================================================
-# F-SUB MANAGEMENT
-# =========================================================
-
-async def show_fsub(
-    query,
-):
-    rows = db.list_fsub()
-
-    text = "<b>📢 Force Subscription</b>\n\n"
-
-    if not rows:
-        text += "No FSub channels configured."
-    else:
-        for row in rows:
-            cid = row.get("channel_id")
-            title = escape(
-                row.get("title")
-                or str(cid)
-            )
-
-            invite = row.get("invite_link") or ""
-
-            text += f"• <b>{title}</b>\n"
-            text += f"ID: <code>{cid}</code>\n"
-
-            if invite:
-                text += f"Invite: {escape(invite)}\n"
-
-            text += "\n"
-
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "➕ ADD CHANNEL",
-                callback_data="add_fsub",
-            ),
-            InlineKeyboardButton(
-                "➖ REMOVE CHANNEL",
-                callback_data="remove_fsub",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "BACK",
-                callback_data="settings",
-            )
-        ],
-    ])
-
-    await query.edit_message_text(
-        text,
-        reply_markup=keyboard,
-        parse_mode="HTML",
-        link_preview_options=link_preview_disabled(),
-    )
-
-
-# =========================================================
-# BROADCAST
-# =========================================================
-
-async def broadcast_command(
-    update,
-    context,
-):
-    if not is_admin(
-        update.effective_user.id
-    ):
-        return
-
-    if not update.message.reply_to_message:
-        await update.message.reply_text(
-            "Reply to a message and use /broadcast."
-        )
-        return
-
-    source = update.message.reply_to_message
-
-    delete_after = None
-
-    if context.args:
-        value = context.args[0].lower()
-
-        try:
-            if value.endswith("h"):
-                hours = float(
-                    value[:-1]
-                )
-                delete_after = hours * 3600
-
-            elif value.endswith("m"):
-                mins = float(
-                    value[:-1]
-                )
-                delete_after = mins * 60
-
-            elif value.endswith("d"):
-                days = float(
-                    value[:-1]
-                )
-                delete_after = days * 86400
-
-        except Exception:
-            delete_after = None
-
-    users = db.list_users()
-
-    if not users:
-        await update.message.reply_text(
-            "No users found."
-        )
-        return
-
-    sent_count = 0
-    failed_count = 0
-
-    delete_at = (
-        now_utc()
-        + timedelta(seconds=delete_after)
-        if delete_after
-        else None
-    )
-
-    try:
-        db.create_broadcast(
-            source.message_id,
-            delete_at,
-        )
-    except Exception:
-        pass
-
-    for row in users:
-        uid = int(row["user_id"])
-
-        if db.is_banned(uid):
-            continue
-
-        try:
-            msg = await context.bot.copy_message(
-                chat_id=uid,
-                from_chat_id=source.chat_id,
-                message_id=source.message_id,
-            )
-
-            sent_count += 1
-
-            if delete_after:
-                context.job_queue.run_once(
-                    delete_job,
-                    delete_after,
-                    data={
-                        "chat_id": uid,
-                        "message_id": msg.message_id,
-                    },
-                )
-
-        except Exception:
-            failed_count += 1
-
-    await update.message.reply_text(
-        "<b>📢 Broadcast Complete</b>\n\n"
-        f"Sent: <b>{sent_count}</b>\n"
-        f"Failed: <b>{failed_count}</b>",
-        parse_mode="HTML",
-    )
-
-
-# =========================================================
-# TIMEZONE
-# =========================================================
-
-TIMEZONES = [
-    ("🇮🇳 India", "Asia/Kolkata"),
-    ("🇦🇪 Dubai", "Asia/Dubai"),
-    ("🇸🇦 Riyadh", "Asia/Riyadh"),
-    ("🇵🇰 Pakistan", "Asia/Karachi"),
-    ("🇧🇩 Bangladesh", "Asia/Dhaka"),
-    ("🇳🇵 Nepal", "Asia/Kathmandu"),
-    ("🇯🇵 Japan", "Asia/Tokyo"),
-    ("🇸🇬 Singapore", "Asia/Singapore"),
-    ("🇬🇧 London", "Europe/London"),
-    ("🇩🇪 Berlin", "Europe/Berlin"),
-    ("🇺🇸 New York", "America/New_York"),
-    ("🇺🇸 Los Angeles", "America/Los_Angeles"),
-]
-
-
-async def timezone_command(
-    update,
-    context,
-):
-    keyboard = []
-
-    for title, tz in TIMEZONES:
-        keyboard.append([
-            InlineKeyboardButton(
-                title,
-                callback_data=f"tz:{tz}",
-            )
-        ])
-
-    await update.message.reply_text(
-        "<b>🌍 Select your timezone</b>",
-        reply_markup=InlineKeyboardMarkup(
-            keyboard
-        ),
-    )
-
-
-# =========================================================
-# CALLBACKS
-# =========================================================
-
-async def callback_handler(
-    update,
-    context,
-):
-    query = update.callback_query
-
-    await query.answer()
-
-    uid = query.from_user.id
-    data = query.data or ""
-
-    # ---------------------------------------------
-    # BASIC UI
-    # ---------------------------------------------
-
-    if data == "close":
-        try:
-            await query.message.delete()
-        except Exception:
-            pass
-
-        return
-
-    if data == "about":
-        await query.edit_message_text(
-            about_caption(),
-            reply_markup=about_keyboard(),
-            parse_mode="HTML",
-            link_preview_options=link_preview_disabled(),
-        )
-        return
-
-    if data == "back_start":
-        image = db.get_setting(
-            "start_image",
-            "",
-        )
-
-        if image:
-            try:
-                await query.message.delete()
-
-                await context.bot.send_photo(
-                    chat_id=uid,
-                    photo=image,
-                    caption=start_caption(),
-                    reply_markup=start_keyboard(),
-                )
-
-                return
-
-            except Exception:
-                pass
-
-        await query.edit_message_text(
-            start_caption(),
-            reply_markup=start_keyboard(),
-            parse_mode="HTML",
-            link_preview_options=link_preview_disabled(),
-        )
-
-        return
-
-    # ---------------------------------------------
-    # F-SUB
-    # ---------------------------------------------
-
-    if data == "check_fsub":
-        ok, joined, missing = await ensure_fsub(
-            context.bot,
-            uid,
-        )
-
-        if not ok:
-            await query.edit_message_text(
-                fsub_text(joined, missing),
-                reply_markup=fsub_keyboard(missing),
-                parse_mode="HTML",
-            )
-            return
-
-        await query.message.delete()
-
-        image = db.get_setting(
-            "start_image",
-            "",
-        )
-
-        if image:
-            try:
-                await context.bot.send_photo(
-                    chat_id=uid,
-                    photo=image,
-                    caption=start_caption(),
-                    reply_markup=start_keyboard(),
-                )
-                return
-            except Exception:
-                pass
-
-        await context.bot.send_message(
-            chat_id=uid,
-            text=start_caption(),
-            reply_markup=start_keyboard(),
-            parse_mode="HTML",
-            link_preview_options=link_preview_disabled(),
-        )
-
-        return
-
-    if data == "fsub_noop":
-        return
-
-    # ---------------------------------------------
-    # TIMEZONE
-    # ---------------------------------------------
-
-    if data.startswith("tz:"):
-        tz_name = data[3:]
-
-        try:
-            ZoneInfo(tz_name)
-        except Exception:
-            await query.answer(
-                "Invalid timezone.",
-                show_alert=True,
-            )
-            return
-
-        db.set_user_timezone(
-            uid,
-            tz_name,
-        )
-
-        await query.edit_message_text(
-            f"✅ Timezone updated to <b>{escape(tz_name)}</b>.",
-            parse_mode="HTML",
-        )
-
-        return
-
-    # ---------------------------------------------
-    # PREMIUM INFO
-    # ---------------------------------------------
-
-    if data == "premium_info":
-        await query.answer(
-            "Premium users get direct file delivery.",
-            show_alert=True,
-        )
-        return
-
-    if data == "tutorial":
-        await query.answer(
-            "Complete the verification and press DOWNLOAD.",
-            show_alert=True,
-        )
-        return
-
-    # ---------------------------------------------
-    # ADMIN PROTECTION
-    # ---------------------------------------------
-
-    if not is_admin(uid):
-        await query.answer(
-            "Owner/Admin only.",
-            show_alert=True,
-        )
-        return
-
-    # ---------------------------------------------
-    # SETTINGS
-    # ---------------------------------------------
-
-    if data == "settings":
-        image = db.get_setting(
-            "start_image",
-            "",
-        )
-
-        auto_delete = db.get_setting(
-            "auto_delete_minutes",
-            "10",
-        )
-
-        await query.edit_message_text(
-            "<b>⚙️ Bot Settings</b>\n\n"
-            f"Start Image: "
-            f"{'Set' if image else 'Not set'}\n"
-            f"Auto Delete: "
-            f"<b>{auto_delete} minutes</b>",
-            reply_markup=settings_keyboard(),
-            parse_mode="HTML",
-        )
-
-        return
-
-    if data == "set_image":
-        _pending_image.add(uid)
-
-        await query.message.reply_text(
-            "🖼 Send the new start image now."
-        )
-
-        return
-
-    if data == "set_autodelete":
-        _pending_autodelete.add(uid)
-
-        await query.message.reply_text(
-            "⏱ Send auto-delete time in minutes.\n"
-            "Example: <code>10</code>",
-            parse_mode="HTML",
-        )
-
-        return
-
-    if data == "admins":
-        await show_admins(query)
-        return
-
-    if data == "add_admin":
-        _pending_admin.add(uid)
-
-        await query.message.reply_text(
-            "Send the Telegram user ID to add as admin."
-        )
-
-        return
-
-    if data == "remove_admin":
-        _pending_admin.add(
-            f"remove:{uid}"
-        )
-
-        await query.message.reply_text(
-            "Send the Telegram user ID to remove from admins."
-        )
-
-        return
-
-    if data == "fsub":
-        await show_fsub(query)
-        return
-
-    if data == "add_fsub":
-        _pending_fsub.add(uid)
-
-        await query.message.reply_text(
-            "Send the channel ID.\n\n"
-            "The bot must be admin in that channel."
-        )
-
-        return
-
-    if data == "remove_fsub":
-        _pending_fsub.add(
-            f"remove:{uid}"
-        )
-
-        await query.message.reply_text(
-            "Send the channel ID to remove."
-        )
-
-        return
-
-
-# =========================================================
-# SETTINGS INPUT
-# =========================================================
-
-async def settings_input_handler(
-    update,
-    context,
-):
-    uid = update.effective_user.id
-
-    if not is_admin(uid):
-        return
-
-    # ---------------------------------------------
-    # IMAGE
-    # ---------------------------------------------
-
-    if uid in _pending_image:
-        if not update.message.photo:
-            await update.message.reply_text(
-                "❌ Please send an image."
-            )
-            return
-
-        file_id = update.message.photo[-1].file_id
-
-        db.set_setting(
-            "start_image",
-            file_id,
-        )
-
-        _pending_image.discard(uid)
-
-        await update.message.reply_text(
-            "✅ Start image updated successfully."
-        )
-
-        return
-
-    # ---------------------------------------------
-    # AUTO DELETE
-    # ---------------------------------------------
-
-    if uid in _pending_autodelete:
-        try:
-            minutes = int(
-                update.message.text.strip()
-            )
-
-            if minutes < 1:
-                raise ValueError
-
-        except Exception:
-            await update.message.reply_text(
-                "❌ Enter a valid number of minutes."
-            )
-            return
-
-        db.set_setting(
-            "auto_delete_minutes",
-            minutes,
-        )
-
-        _pending_autodelete.discard(uid)
-
-        await update.message.reply_text(
-            f"✅ Auto-delete set to {minutes} minutes."
-        )
-
-        return
-
-    # ---------------------------------------------
-    # ADMIN
-    # ---------------------------------------------
-
-    admin_state = None
-
-    if uid in _pending_admin:
-        admin_state = "add"
-
-    elif f"remove:{uid}" in _pending_admin:
-        admin_state = "remove"
-
-    if admin_state:
-        try:
-            target_uid = int(
-                update.message.text.strip()
-            )
-        except Exception:
-            await update.message.reply_text(
-                "❌ Invalid user ID."
-            )
-            return
-
-        if not is_owner(uid):
-            await update.message.reply_text(
-                "❌ Only owner can modify admins."
-            )
-
-            _pending_admin.discard(uid)
-            _pending_admin.discard(
-                f"remove:{uid}"
-            )
-
-            return
-
-        if admin_state == "add":
-            db.add_admin(target_uid)
-
-            await update.message.reply_text(
-                f"✅ <code>{target_uid}</code> added as admin.",
-                parse_mode="HTML",
-            )
-
-        else:
-            db.remove_admin(target_uid)
-
-            await update.message.reply_text(
-                f"✅ <code>{target_uid}</code> removed from admins.",
-                parse_mode="HTML",
-            )
-
-        _pending_admin.discard(uid)
-        _pending_admin.discard(
-            f"remove:{uid}"
-        )
-
-        return
-
-    # ---------------------------------------------
-    # F-SUB
-    # ---------------------------------------------
-
-    fsub_state = None
-
-    if uid in _pending_fsub:
-        fsub_state = "add"
-
-    elif f"remove:{uid}" in _pending_fsub:
-        fsub_state = "remove"
-
-    if fsub_state:
-        if not is_owner(uid):
-            await update.message.reply_text(
-                "❌ Only owner can modify FSub."
-            )
-
-            _pending_fsub.discard(uid)
-            _pending_fsub.discard(
-                f"remove:{uid}"
-            )
-
-            return
-
-        value = update.message.text.strip()
-
-        if fsub_state == "remove":
-            db.del_fsub(value)
-
-            await update.message.reply_text(
-                "✅ FSub channel removed."
-            )
-
-        else:
-            try:
-                channel_id = int(value)
-
-                chat = await context.bot.get_chat(
-                    channel_id
-                )
-
-                title = (
-                    chat.title
-                    or chat.username
-                    or str(channel_id)
-                )
-
-                invite = ""
-
-                try:
-                    invite_obj = (
-                        await context.bot.create_chat_invite_link(
-                            chat_id=channel_id
-                        )
-                    )
-
-                    invite = invite_obj.invite_link
-
-                except Exception:
-                    pass
-
-                db.add_fsub(
-                    channel_id,
-                    invite,
-                    title,
-                )
-
-                await update.message.reply_text(
-                    "✅ FSub channel added.\n\n"
-                    f"Name: <b>{escape(title)}</b>\n"
-                    f"ID: <code>{channel_id}</code>",
-                    parse_mode="HTML",
-                )
-
-            except Exception as exc:
-                logger.exception(
-                    "FSub add error: %s",
-                    exc,
-                )
-
-                await update.message.reply_text(
-                    "❌ Unable to add channel.\n"
-                    "Make sure the bot is admin in the channel."
-                )
-
-        _pending_fsub.discard(uid)
-        _pending_fsub.discard(
-            f"remove:{uid}"
-        )
-
-        return
-
-
-# =========================================================
-# DB CHANNEL INDEXER
-# =========================================================
-
-async def channel_post_indexer(
-    update,
-    context,
-):
-    post = update.channel_post
-
-    if not post:
-        return
-
-    if int(post.chat_id) != int(
-        DB_CHANNEL_ID
-    ):
-        return
-
-    try:
-        caption = (
-            post.caption
-            or post.text
-            or ""
-        )
-
-        file_id = db.add_file(
-            DB_CHANNEL_ID,
-            post.message_id,
-            caption,
-        )
-
-        target = (
-            f"message:{DB_CHANNEL_ID}:"
-            f"{post.message_id}"
-        )
-
-        token = db.create_main_link(
-            target
-        )
-
-        url = main_link_url(token)
-
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "🔗 OPEN",
-                    url=url,
-                ),
-                InlineKeyboardButton(
-                    "📤 SHARE",
-                    url=share_url(url),
-                ),
-            ]
-        ])
-
-        try:
-            await context.bot.edit_message_reply_markup(
-                chat_id=DB_CHANNEL_ID,
-                message_id=post.message_id,
-                reply_markup=keyboard,
-            )
-        except Exception:
-            try:
-                await context.bot.send_message(
-                    chat_id=DB_CHANNEL_ID,
-                    text="🔗 File Link",
-                    reply_to_message_id=post.message_id,
-                    reply_markup=keyboard,
-                    link_preview_options=link_preview_disabled(),
-                )
-            except Exception:
-                pass
-
-    except Exception as exc:
-        logger.exception(
-            "Channel indexing failed: %s",
-            exc,
-        )
 
 
 # =========================================================
@@ -2441,42 +190,3008 @@ async def ban_guard(
     if not user:
         return
 
-    if is_owner(user.id):
+    if user.id == OWNER_ID:
         return
 
-    if db.is_banned(user.id):
-        if update.callback_query:
-            try:
-                await update.callback_query.answer(
-                    "🚫 You are banned.",
-                    show_alert=True,
-                )
-            except Exception:
-                pass
+    try:
+        banned = db.is_banned(
+            user.id
+        )
 
-        elif update.message:
-            try:
-                await update.message.reply_text(
-                    "🚫 You are banned from using this bot."
-                )
-            except Exception:
-                pass
-
+    except Exception:
+        log.exception(
+            "Ban check failed"
+        )
         return
+
+    if not banned:
+        return
+
+    if update.message:
+        try:
+            await update.message.reply_text(
+                "🚫You Are Banned From Using The Bot 🚫"
+            )
+        except Exception:
+            pass
+
+    raise ApplicationHandlerStop
 
 
 # =========================================================
-# ERROR HANDLER
+# START / ABOUT
 # =========================================================
 
-async def error_handler(
+def start_image():
+    return db.get_setting(
+        "start_image",
+        "",
+    )
+
+
+def start_caption():
+    return (
+        "<i>ʜɪ ᴛʜᴇʀᴇ....! 💥</i>\n\n"
+        "ɪ ᴀᴍ ᴀ ꜰɪʟᴇ-ꜱᴛᴏʀᴇ ʙᴏᴛ.\n"
+        "ɪ ᴄᴀɴ ɢᴇɴᴇʀᴀᴛᴇ ʟɪɴᴋꜱ "
+        "ᴅɪʀᴇᴄᴛʟʏ ᴡɪᴛʜ ɴᴏ ᴘʀᴏʙʟᴇᴍꜱ.\n\n"
+        '<b>ᴍʏ ᴏᴡɴᴇʀ:</b> '
+        '<a href="https://t.me/Its_Lozo">'
+        "@ɪᴛꜱ_ʟᴏᴢᴏ"
+        "</a>"
+    )
+
+
+def about_caption():
+    return (
+        "<b>ᴀʙᴏᴜᴛ ᴜꜱ..</b>\n\n"
+        '➤ ᴍᴀᴅᴇ ꜰᴏʀ : '
+        '<a href="https://t.me/Anime_Hub_94">'
+        "ᴀɴɪᴍᴇ ʜᴜʙ"
+        "</a>\n"
+        '➤ ᴏᴡɴᴇʀ : '
+        '<a href="https://t.me/Its_Lozo">'
+        "@ɪᴛꜱ_ʟᴏᴢᴏ"
+        "</a>\n"
+        '➤ ᴅᴇᴠᴇʟᴏᴘᴇʀ : '
+        '<a href="https://t.me/Its_Lozo">'
+        "@ɪᴛꜱ_ʟᴏᴢᴏ"
+        "</a>\n\n"
+        "ᴀᴅɪᴏs !!"
+    )
+
+
+def start_keyboard():
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "ᴀʙᴏᴜᴛ",
+                    callback_data="about",
+                ),
+                InlineKeyboardButton(
+                    "ᴄʟᴏꜱᴇ",
+                    callback_data="close",
+                ),
+            ]
+        ]
+    )
+
+
+def about_keyboard():
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "ʙᴀᴄᴋ",
+                    callback_data="back",
+                ),
+                InlineKeyboardButton(
+                    "ᴄʟᴏꜱᴇ",
+                    callback_data="close",
+                ),
+            ]
+        ]
+    )
+
+
+async def render_start(
+    message,
+):
+    image = start_image()
+
+    if image:
+        try:
+            return await message.reply_photo(
+                photo=image,
+                caption=start_caption(),
+                parse_mode="HTML",
+                reply_markup=start_keyboard(),
+            )
+        except Exception:
+            log.exception(
+                "Could not send start image"
+            )
+
+    await message.reply_text(
+        start_caption(),
+        parse_mode="HTML",
+        reply_markup=start_keyboard(),
+    )
+
+
+async def edit_start(q):
+    image = start_image()
+
+    if image:
+        try:
+            return await q.edit_message_media(
+                media=InputMediaPhoto(
+                    media=image,
+                    caption=start_caption(),
+                    parse_mode="HTML",
+                ),
+                reply_markup=start_keyboard(),
+            )
+        except Exception:
+            pass
+
+    try:
+        await q.edit_message_text(
+            start_caption(),
+            parse_mode="HTML",
+            reply_markup=start_keyboard(),
+        )
+
+    except Exception:
+        pass
+
+
+async def edit_about(q):
+    try:
+        await q.edit_message_caption(
+            caption=about_caption(),
+            parse_mode="HTML",
+            reply_markup=about_keyboard(),
+        )
+
+    except Exception:
+        try:
+            await q.edit_message_text(
+                about_caption(),
+                parse_mode="HTML",
+                reply_markup=about_keyboard(),
+            )
+
+        except Exception:
+            pass
+
+
+# =========================================================
+# FORCE SUB
+# =========================================================
+
+async def is_fsub_member(
+    bot,
+    user_id,
+):
+    missing = []
+
+    for row in db.list_fsub():
+        try:
+            member = await bot.get_chat_member(
+                int(row["channel_id"]),
+                user_id,
+            )
+
+            if member.status in (
+                ChatMemberStatus.LEFT,
+                ChatMemberStatus.BANNED,
+            ):
+                missing.append(row)
+
+        except Exception:
+            missing.append(row)
+
+    return missing
+
+
+def fsub_keyboard(rows):
+    buttons = []
+
+    for row in rows:
+        if row.get("invite_link"):
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        (
+                            f"ᴊᴏɪɴ "
+                            f"{row.get('title') or 'ᴄʜᴀɴɴᴇʟ'}"
+                        ),
+                        url=row["invite_link"],
+                    )
+                ]
+            )
+
+    buttons.append(
+        [
+            InlineKeyboardButton(
+                "✅ ᴄʜᴇᴄᴋ ᴊᴏɪɴ",
+                callback_data="check_fsub",
+            )
+        ]
+    )
+
+    return InlineKeyboardMarkup(
+        buttons
+    )
+
+
+# =========================================================
+# LINKS
+# =========================================================
+
+def main_link_url(token):
+    return (
+        f"https://t.me/{BOT_USERNAME}"
+        f"?start=link_{token}"
+    )
+
+
+def share_url(url):
+    return (
+        "https://t.me/share/url?"
+        f"url={quote(url, safe='')}"
+    )
+
+
+def admin_ok(uid):
+    return (
+        uid == OWNER_ID
+        or db.is_admin(uid)
+    )
+
+
+# =========================================================
+# SETTINGS
+# =========================================================
+
+def settings_keyboard():
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "🖼️ ꜱᴇᴛ ɪᴍᴀɢᴇ",
+                    callback_data="set_image",
+                ),
+                InlineKeyboardButton(
+                    "🗑️ ᴀᴜᴛᴏ ᴅᴇʟᴇᴛᴇ",
+                    callback_data="auto_delete",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "👮 ᴀᴅᴍɪɴꜱ",
+                    callback_data="admins",
+                ),
+                InlineKeyboardButton(
+                    "📢 ꜰꜱᴜʙ",
+                    callback_data="fsub",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "✖️ ᴄʟᴏꜱᴇ",
+                    callback_data="settings_close",
+                )
+            ],
+        ]
+    )
+
+
+def settings_text():
+    return (
+        "<b>⚙️ ꜱᴇᴛᴛɪɴɢꜱ</b>\n\n"
+        "ᴄʜᴏᴏꜱᴇ ᴀɴ ᴏᴘᴛɪᴏɴ."
+    )
+
+
+async def settings(
     update,
     context,
 ):
-    logger.exception(
-        "Unhandled exception",
-        exc_info=context.error,
+    uid = update.effective_user.id
+
+    if not admin_ok(uid):
+        return await update.message.reply_text(
+            "❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ"
+        )
+
+    return await update.message.reply_text(
+        settings_text(),
+        parse_mode="HTML",
+        reply_markup=settings_keyboard(),
     )
+
+
+# =========================================================
+# GENLINK
+# =========================================================
+
+async def genlink(
+    update,
+    context,
+):
+    if not admin_ok(
+        update.effective_user.id
+    ):
+        return await update.message.reply_text(
+            "❌ ʏᴏᴜ ᴀʀᴇ ɴᴏᴛ ᴀᴜᴛʜᴏʀɪᴢᴇᴅ."
+        )
+
+    replied = (
+        update.message.reply_to_message
+    )
+
+    if not replied:
+        return await update.message.reply_text(
+            "ʀᴇᴘʟʏ ᴛᴏ ᴀɴʏ ᴍᴇꜱꜱᴀɢᴇ "
+            "ᴀɴᴅ ᴜꜱᴇ /ɢᴇɴʟɪɴᴋ."
+        )
+
+    try:
+        copied = await context.bot.copy_message(
+            chat_id=DB_CHANNEL_ID,
+            from_chat_id=replied.chat_id,
+            message_id=replied.message_id,
+        )
+
+        db.add_file(
+            DB_CHANNEL_ID,
+            copied.message_id,
+            getattr(
+                replied,
+                "caption",
+                None,
+            )
+            or getattr(
+                replied,
+                "text",
+                None,
+            )
+            or "",
+        )
+
+        main = db.create_main_link(
+            (
+                f"message:"
+                f"{DB_CHANNEL_ID}:"
+                f"{copied.message_id}"
+            )
+        )
+
+        url = main_link_url(
+            main
+        )
+
+        markup = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "↗ ꜱʜᴀʀᴇ ᴜʀʟ",
+                        url=share_url(url),
+                    )
+                ]
+            ]
+        )
+
+        try:
+            await context.bot.edit_message_reply_markup(
+                DB_CHANNEL_ID,
+                copied.message_id,
+                reply_markup=markup,
+            )
+        except Exception:
+            pass
+
+        await update.message.reply_text(
+            (
+                "✅ <b>ɢᴇɴʟɪɴᴋ ɢᴇɴᴇʀᴀᴛᴇᴅ</b>\n\n"
+                f"{url}"
+            ),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=markup,
+        )
+
+    except Exception:
+        log.exception(
+            "Genlink failed"
+        )
+
+        await update.message.reply_text(
+            "❌ ɢᴇɴʟɪɴᴋ ɢᴇɴᴇʀᴀᴛᴇ ɴᴀʜɪ ʜᴜᴀ."
+        )
+
+
+# =========================================================
+# BATCH
+# =========================================================
+
+def parse_message_link(link):
+    match = re.fullmatch(
+        r"https?://t\.me/c/(\d+)/(\d+)",
+        link.strip(),
+    )
+
+    if match:
+        return (
+            int(
+                "-100"
+                + match.group(1)
+            ),
+            int(
+                match.group(2)
+            ),
+        )
+
+    match = re.fullmatch(
+        r"https?://t\.me/([^/]+)/(\d+)",
+        link.strip(),
+    )
+
+    if match:
+        return (
+            match.group(1),
+            int(
+                match.group(2)
+            ),
+        )
+
+    return None
+
+
+async def batch(
+    update,
+    context,
+):
+    if not admin_ok(
+        update.effective_user.id
+    ):
+        return await update.message.reply_text(
+            "❌ ʏᴏᴜ ᴀʀᴇ ɴᴏᴛ ᴀᴜᴛʜᴏʀɪᴢᴇᴅ."
+        )
+
+    if len(context.args) != 2:
+        return await update.message.reply_text(
+            "ᴜꜱᴀɢᴇ:\n"
+            "/ʙᴀᴛᴄʜ <ꜰɪʀꜱᴛ ᴅʙ ʟɪɴᴋ> "
+            "<ʟᴀꜱᴛ ᴅʙ ʟɪɴᴋ>"
+        )
+
+    first = parse_message_link(
+        context.args[0]
+    )
+
+    last = parse_message_link(
+        context.args[1]
+    )
+
+    if not first or not last:
+        return await update.message.reply_text(
+            "❌ ɪɴᴠᴀʟɪᴅ ᴛᴇʟᴇɢʀᴀᴍ ᴘᴏꜱᴛ ʟɪɴᴋ."
+        )
+
+    try:
+        fc = (
+            (
+                await context.bot.get_chat(
+                    first[0]
+                )
+            ).id
+            if isinstance(
+                first[0],
+                str,
+            )
+            else first[0]
+        )
+
+        lc = (
+            (
+                await context.bot.get_chat(
+                    last[0]
+                )
+            ).id
+            if isinstance(
+                last[0],
+                str,
+            )
+            else last[0]
+        )
+
+    except Exception:
+        return await update.message.reply_text(
+            "❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ʀᴇꜱᴏʟᴠᴇ "
+            "ᴛʜᴇ ᴅʙ ᴄʜᴀɴɴᴇʟ."
+        )
+
+    if (
+        fc != DB_CHANNEL_ID
+        or lc != DB_CHANNEL_ID
+    ):
+        return await update.message.reply_text(
+            "❌ ʙᴏᴛʜ ʟɪɴᴋꜱ ᴍᴜꜱᴛ ʙᴇ "
+            "ꜰʀᴏᴍ ᴛʜᴇ ᴅʙ ᴄʜᴀɴɴᴇʟ."
+        )
+
+    lo, hi = sorted(
+        (
+            first[1],
+            last[1],
+        )
+    )
+
+    rows = db.list_files_between(
+        DB_CHANNEL_ID,
+        lo,
+        hi,
+    )
+
+    if not rows:
+        return await update.message.reply_text(
+            "❌ ɴᴏ ᴅʙ ᴘᴏꜱᴛꜱ ꜰᴏᴜɴᴅ "
+            "ɪɴ ᴛʜɪꜱ ʀᴀɴɢᴇ."
+        )
+
+    bid = db.create_batch(
+        [
+            r["file_id"]
+            for r in rows
+        ]
+    )
+
+    main = db.create_main_link(
+        f"batch:{bid}"
+    )
+
+    url = main_link_url(
+        main
+    )
+
+    markup = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "↗ ꜱʜᴀʀᴇ ᴜʀʟ",
+                    url=share_url(url),
+                )
+            ]
+        ]
+    )
+
+    await context.bot.send_message(
+        DB_CHANNEL_ID,
+        "📦 <b>ʙᴀᴛᴄʜ ꜱʜᴀʀᴇ ᴜʀʟ</b>",
+        parse_mode="HTML",
+        reply_markup=markup,
+    )
+
+    await update.message.reply_text(
+        (
+            "✅ <b>ʙᴀᴛᴄʜ ʟɪɴᴋ ɢᴇɴᴇʀᴀᴛᴇᴅ</b>\n\n"
+            f"ɪᴛᴇᴍꜱ: <b>{len(rows)}</b>\n\n"
+            f"{url}"
+        ),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+        reply_markup=markup,
+    )
+
+
+# =========================================================
+# DOWNLOAD PAGE
+# =========================================================
+
+async def send_download_page(
+    message,
+    short_url,
+):
+    caption = (
+        "<i>📊 ʜᴇʏ ʙʀᴏ/ꜱɪꜱ,</i>\n\n"
+        "➜ ʏᴏᴜʀ ʟɪɴᴋ ɪꜱ ʀᴇᴀᴅʏ, "
+        "ᴋɪɴᴅʟʏ ᴄʟɪᴄᴋ ᴏɴ\n"
+        "ᴅᴏᴡɴʟᴏᴀᴅ ʙᴜᴛᴛᴏɴ! 👇\n\n"
+        "ᴛᴏ ʙᴜʏ ᴘʀᴇᴍɪᴜᴍ, "
+        "ᴄᴏɴᴛᴀᴄᴛ: "
+        '<a href="https://t.me/Its_Lozo">'
+        "@ɪᴛꜱ_ʟᴏᴢᴏ"
+        "</a>"
+    )
+
+    kb = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "• ᴄʟɪᴄᴋ ʜᴇʀᴇ ᴛᴏ ᴅᴏᴡɴʟᴏᴀᴅ •",
+                    url=short_url,
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "ᴘʀᴇᴍɪᴜᴍ",
+                    url="https://t.me/PremiumHub094",
+                ),
+                InlineKeyboardButton(
+                    "ᴛᴜᴛᴏʀɪᴀʟ",
+                    url="https://t.me/Tutorial_Hub_94/4",
+                ),
+            ],
+        ]
+    )
+
+    image = start_image()
+
+    if image:
+        try:
+            return await message.reply_photo(
+                photo=image,
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
+        except Exception:
+            pass
+
+    await message.reply_text(
+        caption,
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
+
+
+# =========================================================
+# DELIVERY
+# =========================================================
+
+async def deliver_target(
+    update,
+    target,
+):
+    ids = []
+
+    bot = update.get_bot()
+
+    chat_id = (
+        update.effective_chat.id
+    )
+
+    if target.startswith(
+        "message:"
+    ):
+        _, cid, mid = target.split(
+            ":",
+            2,
+        )
+
+        message = await bot.copy_message(
+            chat_id=chat_id,
+            from_chat_id=int(cid),
+            message_id=int(mid),
+        )
+
+        ids.append(
+            message.message_id
+        )
+
+    elif target.startswith(
+        "batch:"
+    ):
+        bid = target.split(
+            ":",
+            1,
+        )[1]
+
+        rows = db.get_batch_items(
+            bid
+        )
+
+        if not rows:
+            return []
+
+        for row in rows:
+            try:
+                message = await bot.copy_message(
+                    chat_id=chat_id,
+                    from_chat_id=int(
+                        row["channel_id"]
+                    ),
+                    message_id=int(
+                        row["message_id"]
+                    ),
+                )
+
+                ids.append(
+                    message.message_id
+                )
+
+            except Exception:
+                log.exception(
+                    "Batch delivery failed"
+                )
+
+    return ids
+
+
+async def delete_delivered(
+    context,
+):
+    data = context.job.data
+
+    for mid in data[
+        "message_ids"
+    ]:
+        try:
+            await context.bot.delete_message(
+                data["chat_id"],
+                mid,
+            )
+
+        except Exception:
+            pass
+
+
+def auto_delete_minutes():
+    try:
+        return max(
+            0,
+            int(
+                db.get_setting(
+                    "auto_delete_minutes",
+                    "10",
+                )
+            ),
+        )
+
+    except Exception:
+        return 10
+
+
+async def deliver_and_notify(
+    update,
+    context,
+    target,
+):
+    ids = await deliver_target(
+        update,
+        target,
+    )
+
+    if not ids:
+        return
+
+    mins = auto_delete_minutes()
+
+    if mins > 0:
+        msg = await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=(
+                f"ᴛʜɪs ꜰɪʟᴇ ɪs ᴅᴇʟᴇᴛɪɴɢ "
+                f"ᴀᴜᴛᴏᴍᴀᴛɪᴄᴀʟʟʏ ɪɴ "
+                f"{mins} ᴍɪɴᴜᴛᴇꜱ.\n\n"
+                "ꜰᴏʀᴡᴀʀᴅ ɪᴛ ᴛᴏ ʏᴏᴜʀ "
+                "ꜱᴀᴠᴇᴅ ᴍᴇꜱꜱᴀɢᴇꜱ..!"
+            ),
+        )
+
+        ids.append(
+            msg.message_id
+        )
+
+        context.job_queue.run_once(
+            delete_delivered,
+            mins * 60,
+            data={
+                "chat_id": (
+                    update.effective_chat.id
+                ),
+                "message_ids": ids,
+            },
+        )
+
+
+# =========================================================
+# BYPASS MESSAGE
+# =========================================================
+
+def bypass_message():
+    return (
+        "<b>🚫 ʙʏᴘᴀss ᴅᴇᴛᴇᴄᴛᴇᴅ</b>\n\n"
+        "ʏᴏᴜ ʜᴀᴠᴇ ʙᴇᴇɴ ᴅᴇᴛᴇᴄᴛᴇᴅ ᴜsɪɴɢ ᴀ ʙʏᴘᴀss "
+        "ᴛᴏ sᴋɪᴘ ᴛʜᴇ ʀᴇǫᴜɪʀᴇᴅ ᴠᴇʀɪғɪᴄᴀᴛɪᴏɴ ᴛɪᴍᴇ.\n\n"
+        "ᴀs ᴀ ʀᴇsᴜʟᴛ, ʏᴏᴜʀ ᴀᴄᴄᴇss ᴛᴏ ᴛʜɪs ʙᴏᴛ "
+        "ʜᴀs ʙᴇᴇɴ <b>ᴘᴇʀᴍᴀɴᴇɴᴛʟʏ ʀᴇsᴛʀɪᴄᴛᴇᴅ.</b>\n\n"
+        f'ɪғ ʏᴏᴜ ʙᴇʟɪᴇᴠᴇ ᴛʜɪs ᴡᴀs ᴀ ᴍɪsᴛᴀᴋᴇ, '
+        f'ᴄᴏɴᴛᴀᴄᴛ '
+        f'<a href="tg://user?id={OWNER_ID}">'
+        f"ʟᴏᴢᴏ_⁹⁴"
+        f"</a>."
+    )
+
+
+# =========================================================
+# VERIFY
+# =========================================================
+
+async def verify(
+    update,
+    context,
+    token,
+):
+    uid = update.effective_user.id
+
+    # =====================================================
+    # OWNER EXEMPTION
+    # =====================================================
+
+    if uid == OWNER_ID:
+        row = db.get_token(
+            token
+        )
+
+        if row:
+            if int(
+                row["user_id"]
+            ) == uid:
+                target = db.consume_token(
+                    token,
+                    uid,
+                )
+            else:
+                target = row["target"]
+
+            if target:
+                return await deliver_and_notify(
+                    update,
+                    context,
+                    target,
+                )
+
+        return await update.message.reply_text(
+            "❌ ᴛʜɪꜱ ʟɪɴᴋ ɪs ɴᴏᴛ ᴠᴀʟɪᴅ."
+        )
+
+    # =====================================================
+    # FORCE SUB
+    # =====================================================
+
+    missing = await is_fsub_member(
+        context.bot,
+        uid,
+    )
+
+    if missing:
+        return await update.message.reply_text(
+            "⚡ <b>ᴊᴏɪɴ ʀᴇǫᴜɪʀᴇᴅ</b>\n\n"
+            "ᴊᴏɪɴ ᴀʟʟ ʀᴇǫᴜɪʀᴇᴅ ᴄʜᴀɴɴᴇʟꜱ "
+            "ᴛʜᴇɴ ᴛᴀᴘ ᴄʜᴇᴄᴋ ᴊᴏɪɴ.",
+            parse_mode="HTML",
+            reply_markup=fsub_keyboard(
+                missing
+            ),
+        )
+
+    # =====================================================
+    # TOKEN VALIDATION
+    # =====================================================
+
+    row = db.get_token(
+        token
+    )
+
+    if (
+        not row
+        or int(
+            row["user_id"]
+        ) != uid
+    ):
+        return await update.message.reply_text(
+            "❌ ᴛʜɪꜱ ꜱʜᴏʀᴛᴇɴᴇʀ ʟɪɴᴋ "
+            "ɪs ɴᴏᴛ ᴍᴀᴅᴇ ꜰᴏʀ ʏᴏᴜ."
+        )
+
+    # =====================================================
+    # ALREADY USED
+    # =====================================================
+
+    if row.get("used"):
+        return await update.message.reply_text(
+            "❌ ᴛʜɪꜱ ꜱʜᴏʀᴛᴇɴᴇʀ ʟɪɴᴋ "
+            "ɪs ᴀʟʀᴇᴀᴅʏ ᴜsᴇᴅ."
+        )
+
+    # =====================================================
+    # EXPIRED CHECK
+    # =====================================================
+
+    try:
+        if db._dt(
+            row["expires_at"]
+        ) <= datetime.now(
+            timezone.utc
+        ):
+            return await update.message.reply_text(
+                "❌ ᴛʜɪꜱ ꜱʜᴏʀᴛᴇɴᴇʀ ʟɪɴᴋ "
+                "ɪs ᴇxᴘɪʀᴇᴅ."
+            )
+
+    except Exception:
+        return await update.message.reply_text(
+            "❌ ᴛʜɪꜱ ꜱʜᴏʀᴛᴇɴᴇʀ ʟɪɴᴋ "
+            "ɪs ɴᴏᴛ ᴠᴀʟɪᴅ."
+        )
+
+    # =====================================================
+    # ANTI-BYPASS CHECK
+    #
+    # Token created when open_main() creates the shortener
+    # token.
+    #
+    # Less than 90 seconds = bypass
+    # 90 seconds or more = normal delivery
+    # =====================================================
+
+    age = db.get_token_age_seconds(
+        token
+    )
+
+    if (
+        age is not None
+        and age < BYPASS_MIN_SECONDS
+    ):
+        log.warning(
+            "BYPASS DETECTED | user=%s | token=%s | age=%.2fs",
+            uid,
+            token,
+            age,
+        )
+
+        # Auto-ban
+        db.ban_user(
+            uid,
+            reason="Bypass Detected",
+        )
+
+        # Invalidate token
+        try:
+            db.consume_token(
+                token,
+                uid,
+            )
+        except Exception:
+            pass
+
+        return await update.message.reply_text(
+            bypass_message(),
+            parse_mode="HTML",
+            link_preview_options=LinkPreviewOptions(
+                is_disabled=True
+            ),
+        )
+
+    # =====================================================
+    # NORMAL DELIVERY
+    # =====================================================
+
+    target = db.consume_token(
+        token,
+        uid,
+    )
+
+    if not target:
+        return await update.message.reply_text(
+            "❌ ᴛʜɪꜱ ꜱʜᴏʀᴛᴇɴᴇʀ ʟɪɴᴋ "
+            "ɪs ᴇxᴘɪʀᴇᴅ ᴏʀ ᴀʟʀᴇᴀᴅʏ ᴜsᴇᴅ."
+        )
+
+    await deliver_and_notify(
+        update,
+        context,
+        target,
+    )
+
+
+# =========================================================
+# OPEN MAIN LINK
+# =========================================================
+
+async def open_main(
+    update,
+    context,
+    token,
+):
+    uid = update.effective_user.id
+
+    row = db.get_main_link(
+        token
+    )
+
+    if not row:
+        return await update.message.reply_text(
+            "❌ ᴛʜɪꜱ ʟɪɴᴋ ɪs ɴᴏᴛ ᴠᴀʟɪᴅ."
+        )
+
+    missing = await is_fsub_member(
+        context.bot,
+        uid,
+    )
+
+    if missing:
+        return await update.message.reply_text(
+            "⚡ <b>ᴊᴏɪɴ ʀᴇǫᴜɪʀᴇᴅ</b>\n\n"
+            "ᴊᴏɪɴ ᴀʟʟ ʀᴇǫᴜɪʀᴇᴅ ᴄʜᴀɴɴᴇʟꜱ "
+            "ᴛʜᴇɴ ᴛᴀᴘ ᴄʜᴇᴄᴋ ᴊᴏɪɴ.",
+            parse_mode="HTML",
+            reply_markup=fsub_keyboard(
+                missing
+            ),
+        )
+
+    # =====================================================
+    # OWNER / PREMIUM EXEMPTION
+    # =====================================================
+
+    if (
+        uid == OWNER_ID
+        or db.is_premium(uid)
+    ):
+        return await deliver_and_notify(
+            update,
+            context,
+            row["target"],
+        )
+
+    # =====================================================
+    # CREATE TOKEN
+    #
+    # created_at is stored here.
+    # Anti-bypass timer starts from this point.
+    # =====================================================
+
+    tok = db.create_token(
+        uid,
+        row["target"],
+        2,
+    )
+
+    short_url = shortener.create_from_token(
+        tok,
+        BOT_USERNAME,
+    )
+
+    if not short_url:
+        return await update.message.reply_text(
+            "⚠️ ꜱʜᴏʀᴛᴇɴᴇʀ ɪꜱ ɴᴏᴛ "
+            "ᴄᴏɴꜰɪɢᴜʀᴇᴅ ᴄᴏʀʀᴇᴄᴛʟʏ."
+        )
+
+    await send_download_page(
+        update.message,
+        short_url,
+    )
+
+
+# =========================================================
+# START COMMAND
+# =========================================================
+
+async def start(
+    update,
+    context,
+):
+    u = update.effective_user
+
+    db.add_user(
+        u.id,
+        u.username or "",
+        u.first_name or "",
+    )
+
+    if db.is_banned(
+        u.id
+    ):
+        return await update.message.reply_text(
+            "🚫 ʏᴏᴜ ᴀʀᴇ ʙᴀɴɴᴇᴅ."
+        )
+
+    if context.args:
+        arg = context.args[0]
+
+        if arg.startswith(
+            "verify_"
+        ):
+            return await verify(
+                update,
+                context,
+                arg[7:],
+            )
+
+        if arg.startswith(
+            "link_"
+        ):
+            return await open_main(
+                update,
+                context,
+                arg[5:],
+            )
+
+    await render_start(
+        update.message
+    )
+
+
+# =========================================================
+# TIMEZONE SYSTEM
+# =========================================================
+
+TIMEZONE_OPTIONS = {
+    "Asia/Kolkata": "🇮🇳 India",
+    "Asia/Dubai": "🇦🇪 UAE",
+    "Asia/Riyadh": "🇸🇦 Saudi Arabia",
+    "Asia/Karachi": "🇵🇰 Pakistan",
+    "Asia/Dhaka": "🇧🇩 Bangladesh",
+    "Asia/Kathmandu": "🇳🇵 Nepal",
+    "Asia/Tokyo": "🇯🇵 Japan",
+    "Asia/Singapore": "🇸🇬 Singapore",
+    "Europe/London": "🇬🇧 UK",
+    "Europe/Berlin": "🇩🇪 Germany",
+    "America/New_York": "🇺🇸 USA - Eastern",
+    "America/Chicago": "🇺🇸 USA - Central",
+    "America/Denver": "🇺🇸 USA - Mountain",
+    "America/Los_Angeles": "🇺🇸 USA - Pacific",
+}
+
+
+def timezone_keyboard():
+    buttons = []
+
+    for (
+        tz_name,
+        label,
+    ) in TIMEZONE_OPTIONS.items():
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    label,
+                    callback_data=(
+                        f"tz:{tz_name}"
+                    ),
+                )
+            ]
+        )
+
+    buttons.append(
+        [
+            InlineKeyboardButton(
+                "❌ ᴄʟᴏsᴇ",
+                callback_data="tz_close",
+            )
+        ]
+    )
+
+    return InlineKeyboardMarkup(
+        buttons
+    )
+
+
+def timezone_display_name(
+    tz_name
+):
+    return TIMEZONE_OPTIONS.get(
+        tz_name,
+        tz_name,
+    )
+
+
+async def timezone_command(
+    update,
+    context,
+):
+    uid = update.effective_user.id
+
+    db.add_user(
+        uid,
+        update.effective_user.username
+        or "",
+        update.effective_user.first_name
+        or "",
+    )
+
+    current = db.get_user_timezone(
+        uid
+    )
+
+    try:
+        now_local = datetime.now(
+            timezone.utc
+        ).astimezone(
+            ZoneInfo(current)
+        )
+
+        current_time = now_local.strftime(
+            "%d-%m-%Y %I:%M:%S %p"
+        )
+
+    except Exception:
+        current = "Asia/Kolkata"
+
+        current_time = datetime.now(
+            timezone.utc
+        ).astimezone(
+            IST
+        ).strftime(
+            "%d-%m-%Y %I:%M:%S %p"
+        )
+
+    text = (
+        "🌍 <b>ᴄʜᴏᴏꜱᴇ ʏᴏᴜʀ ᴛɪᴍᴇᴢᴏɴᴇ</b>\n\n"
+        f"🕐 ᴄᴜʀʀᴇɴᴛ: "
+        f"<b>{timezone_display_name(current)}</b>\n"
+        f"📅 ʟᴏᴄᴀʟ ᴛɪᴍᴇ: "
+        f"<code>{current_time}</code>\n\n"
+        "ᴛʜɪꜱ ᴡɪʟʟ ʙᴇ ᴜꜱᴇᴅ ꜰᴏʀ ʏᴏᴜʀ "
+        "ᴘʀᴇᴍɪᴜᴍ ꜱᴜʙꜱᴄʀɪᴘᴛɪᴏɴ ᴛɪᴍᴇ."
+    )
+
+    await update.message.reply_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=timezone_keyboard(),
+    )
+
+
+# =========================================================
+# CALLBACK HANDLER
+# =========================================================
+
+async def callback(
+    update,
+    context,
+):
+    q = update.callback_query
+
+    uid = q.from_user.id
+
+    # =====================================================
+    # BLOCK BANNED USERS FROM CALLBACKS TOO
+    # =====================================================
+
+    if uid != OWNER_ID:
+        try:
+            if db.is_banned(uid):
+                await q.answer(
+                    "🚫 ʏᴏᴜ ᴀʀᴇ ʙᴀɴɴᴇᴅ.",
+                    show_alert=True,
+                )
+                return
+
+        except Exception:
+            log.exception(
+                "Callback ban check failed"
+            )
+
+    # =====================================================
+    # TIMEZONE CALLBACKS
+    # =====================================================
+
+    if q.data.startswith(
+        "tz:"
+    ):
+        tz_name = q.data[3:]
+
+        try:
+            ZoneInfo(tz_name)
+
+        except Exception:
+            return await q.answer(
+                "❌ ɪɴᴠᴀʟɪᴅ ᴛɪᴍᴇᴢᴏɴᴇ.",
+                show_alert=True,
+            )
+
+        db.set_user_timezone(
+            uid,
+            tz_name,
+        )
+
+        try:
+            local_now = datetime.now(
+                timezone.utc
+            ).astimezone(
+                ZoneInfo(tz_name)
+            )
+
+            time_text = local_now.strftime(
+                "%d-%m-%Y %I:%M:%S %p"
+            )
+
+        except Exception:
+            time_text = "—"
+
+        await q.answer(
+            "✅ ᴛɪᴍᴇᴢᴏɴᴇ ᴜᴘᴅᴀᴛᴇᴅ",
+            show_alert=False,
+        )
+
+        try:
+            await q.message.edit_text(
+                "✅ <b>ᴛɪᴍᴇᴢᴏɴᴇ ᴜᴘᴅᴀᴛᴇᴅ</b>\n\n"
+                f"🌍 ᴛɪᴍᴇᴢᴏɴᴇ: "
+                f"<b>{timezone_display_name(tz_name)}</b>\n"
+                f"🕐 ʟᴏᴄᴀʟ ᴛɪᴍᴇ: "
+                f"<code>{time_text}</code>\n\n"
+                "ʏᴏᴜʀ /myplan ᴛɪᴍᴇꜱ ᴡɪʟʟ ɴᴏᴡ "
+                "ʙᴇ ꜱʜᴏᴡɴ ɪɴ ᴛʜɪꜱ ᴛɪᴍᴇᴢᴏɴᴇ.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "🌍 ᴄʜᴀɴɢᴇ ᴛɪᴍᴇᴢᴏɴᴇ",
+                                callback_data="timezone_menu",
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                "✖️ ᴄʟᴏꜱᴇ",
+                                callback_data="tz_close",
+                            )
+                        ],
+                    ]
+                ),
+            )
+
+        except Exception:
+            pass
+
+        return
+
+    if q.data == "timezone_menu":
+        await q.answer()
+
+        current = db.get_user_timezone(
+            uid
+        )
+
+        return await q.message.edit_text(
+            "🌍 <b>ᴄʜᴏᴏꜱᴇ ʏᴏᴜʀ ᴛɪᴍᴇᴢᴏɴᴇ</b>\n\n"
+            f"ᴄᴜʀʀᴇɴᴛ: "
+            f"<b>{timezone_display_name(current)}</b>",
+            parse_mode="HTML",
+            reply_markup=timezone_keyboard(),
+        )
+
+    if q.data == "tz_close":
+        await q.answer()
+
+        try:
+            await q.message.delete()
+
+        except Exception:
+            pass
+
+        return
+
+    # =====================================================
+    # NORMAL ADMIN CALLBACKS
+    # =====================================================
+
+    if not admin_ok(uid):
+        return await q.answer(
+            "❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ",
+            show_alert=True,
+        )
+
+    if (
+        q.data in (
+            "add_admin",
+            "remove_admin",
+        )
+        and uid != OWNER_ID
+    ):
+        return await q.answer(
+            "🚫 ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ "
+            "ᴀᴅᴅ/ʀᴇᴍᴏᴠᴇ ᴀᴅᴍɪɴꜱ",
+            show_alert=True,
+        )
+
+    if (
+        q.data in (
+            "add_fsub",
+            "remove_fsub",
+        )
+        and uid != OWNER_ID
+    ):
+        return await q.answer(
+            "🚫 ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ "
+            "ᴀᴅᴅ/ʀᴇᴍᴏᴠᴇ ꜰꜱᴜʙ",
+            show_alert=True,
+        )
+
+    await q.answer()
+
+    # =====================================================
+    # CLOSE
+    # =====================================================
+
+    if q.data in (
+        "close",
+        "settings_close",
+    ):
+        try:
+            await q.message.delete()
+
+        except Exception:
+            pass
+
+        return
+
+    # =====================================================
+    # ABOUT
+    # =====================================================
+
+    if q.data == "about":
+        return await edit_about(q)
+
+    # =====================================================
+    # BACK
+    # =====================================================
+
+    if q.data == "back":
+        return await edit_start(q)
+
+    # =====================================================
+    # F-SUB CHECK
+    # =====================================================
+
+    if q.data == "check_fsub":
+        missing = await is_fsub_member(
+            context.bot,
+            uid,
+        )
+
+        if missing:
+            return await q.answer(
+                "❌ ᴊᴏɪɴ ᴀʟʟ ᴄʜᴀɴɴᴇʟꜱ ꜰɪʀꜱᴛ.",
+                show_alert=True,
+            )
+
+        try:
+            await q.message.delete()
+
+        except Exception:
+            pass
+
+        return await render_start(
+            q.message
+        )
+
+    # =====================================================
+    # SET START IMAGE
+    # =====================================================
+
+    if q.data == "set_image":
+        _pending_image.add(uid)
+
+        return await q.message.reply_text(
+            "🖼️ ʟᴇᴛ ᴍᴇ ʜᴀᴠᴇ ᴛʜᴇ ɪᴍᴀɢᴇ "
+            "ʏᴏᴜ ᴡᴀɴᴛ ᴛᴏ ᴜꜱᴇ ᴀꜱ ꜱᴛᴀʀᴛ ɪᴍᴀɢᴇ."
+        )
+
+    # =====================================================
+    # AUTO DELETE
+    # =====================================================
+
+    if q.data == "auto_delete":
+        cur = auto_delete_minutes()
+
+        _pending_autodelete.add(uid)
+
+        return await q.message.reply_text(
+            f"🗑️ ᴀᴜᴛᴏ ᴅᴇʟᴇᴛᴇ ᴛɪᴍᴇ: "
+            f"<b>{cur} ᴍɪɴᴜᴛᴇꜱ</b>\n\n"
+            "ꜱᴇɴᴅ ᴛʜᴇ ɴᴇᴡ ᴛɪᴍᴇ "
+            "ɪɴ ᴍɪɴᴜᴛᴇꜱ.\n"
+            "ꜱᴇɴᴅ <code>0</code> ᴛᴏ ᴅɪꜱᴀʙʟᴇ.",
+            parse_mode="HTML",
+        )
+
+    # =====================================================
+    # ADMINS LIST
+    # =====================================================
+
+    if q.data == "admins":
+        lines = [
+            "<b>👮 ᴀᴅᴍɪɴꜱ</b>",
+            "",
+            (
+                f'• <a href="tg://user?id={OWNER_ID}">'
+                f"ᴏᴡɴᴇʀ</a> — "
+                f"<code>{OWNER_ID}</code>"
+            ),
+        ]
+
+        for a in db.list_admins():
+            name = (
+                a["first_name"]
+                or (
+                    "@"
+                    + a["username"]
+                    if a["username"]
+                    else "ᴀᴅᴍɪɴ"
+                )
+            )
+
+            name = escape(
+                name
+            )
+
+            lines.append(
+                (
+                    f'• <a href="tg://user?id='
+                    f'{a["user_id"]}">'
+                    f"{name}</a> — "
+                    f"<code>{a['user_id']}</code>"
+                )
+            )
+
+        return await q.message.edit_text(
+            "\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "➕ ᴀᴅᴅ ᴀᴅᴍɪɴ",
+                            callback_data="add_admin",
+                        ),
+                        InlineKeyboardButton(
+                            "➖ ʀᴇᴍᴏᴠᴇ",
+                            callback_data="remove_admin",
+                        ),
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "↩️ ʙᴀᴄᴋ",
+                            callback_data="settings_back",
+                        )
+                    ],
+                ]
+            ),
+        )
+
+    # =====================================================
+    # ADD ADMIN
+    # =====================================================
+
+    if q.data == "add_admin":
+        if uid != OWNER_ID:
+            return await q.answer(
+                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ "
+                "ᴀᴅᴅ ᴀᴅᴍɪɴꜱ.",
+                show_alert=True,
+            )
+
+        _pending_admin.add(uid)
+
+        return await q.message.reply_text(
+            "➕ ꜱᴇɴᴅ ᴛʜᴇ ᴜꜱᴇʀ ɪᴅ "
+            "ᴛᴏ ᴀᴅᴅ ᴀꜱ ᴀᴅᴍɪɴ."
+        )
+
+    # =====================================================
+    # REMOVE ADMIN
+    # =====================================================
+
+    if q.data == "remove_admin":
+        if uid != OWNER_ID:
+            return await q.answer(
+                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ "
+                "ʀᴇᴍᴏᴠᴇ ᴀᴅᴍɪɴꜱ.",
+                show_alert=True,
+            )
+
+        _pending_admin.add(
+            -uid
+        )
+
+        return await q.message.reply_text(
+            "➖ ꜱᴇɴᴅ ᴛʜᴇ ᴜꜱᴇʀ ɪᴅ "
+            "ᴛᴏ ʀᴇᴍᴏᴠᴇ ᴀɴ ᴀᴅᴍɪɴ."
+        )
+
+    # =====================================================
+    # F-SUB LIST
+    # =====================================================
+
+    if q.data == "fsub":
+        rows = db.list_fsub()
+
+        lines = [
+            "<b>📢 ꜰꜱᴜʙ ᴄʜᴀɴɴᴇʟꜱ</b>",
+            "",
+        ]
+
+        for r in rows:
+            invite = r.get(
+                "invite_link",
+                "",
+            )
+
+            title = r.get(
+                "title",
+                "ᴄʜᴀɴɴᴇʟ",
+            )
+
+            title = escape(
+                title
+            )
+
+            if invite:
+                lines.append(
+                    (
+                        f'• <a href="{escape(invite)}">'
+                        f"{title}</a> — "
+                        f'<code>{r["channel_id"]}</code>'
+                    )
+                )
+
+            else:
+                lines.append(
+                    (
+                        f"• {title} — "
+                        f'<code>{r["channel_id"]}</code>'
+                    )
+                )
+
+        kb = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "➕ ᴀᴅᴅ ꜰꜱᴜʙ",
+                        callback_data="add_fsub",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "➖ ʀᴇᴍᴏᴠᴇ ꜰꜱᴜʙ",
+                        callback_data="remove_fsub",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "↩️ ʙᴀᴄᴋ",
+                        callback_data="settings_back",
+                    )
+                ],
+            ]
+        )
+
+        return await q.message.edit_text(
+            "\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
+
+    # =====================================================
+    # ADD F-SUB
+    # =====================================================
+
+    if q.data == "add_fsub":
+        if uid != OWNER_ID:
+            return await q.answer(
+                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ "
+                "ᴀᴅᴅ ꜰꜱᴜʙ.",
+                show_alert=True,
+            )
+
+        _pending_fsub.add(uid)
+
+        return await q.message.reply_text(
+            "📢 ꜱᴇɴᴅ ᴛʜᴇ ᴄʜᴀɴɴᴇʟ ɪᴅ ᴏɴʟʏ.\n"
+            "ᴛʜᴇ ʙᴏᴛ ᴡɪʟʟ ɢᴇᴛ "
+            "ᴛʜᴇ ᴄʜᴀɴɴᴇʟ ɴᴀᴍᴇ ᴀɴᴅ "
+            "ɪɴᴠɪᴛᴇ ʟɪɴᴋ ᴀᴜᴛᴏᴍᴀᴛɪᴄᴀʟʟʏ."
+        )
+
+    # =====================================================
+    # REMOVE F-SUB
+    # =====================================================
+
+    if q.data == "remove_fsub":
+        if uid != OWNER_ID:
+            return await q.answer(
+                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ "
+                "ʀᴇᴍᴏᴠᴇ ꜰꜱᴜʙ.",
+                show_alert=True,
+            )
+
+        _pending_fsub.add(
+            uid * 1000000000 + 1
+        )
+
+        return await q.message.reply_text(
+            "➖ ꜱᴇɴᴅ ᴛʜᴇ ꜰꜱᴜʙ "
+            "ᴄʜᴀɴɴᴇʟ ɪᴅ ᴛᴏ ʀᴇᴍᴏᴠᴇ."
+        )
+
+    # =====================================================
+    # SETTINGS BACK
+    # =====================================================
+
+    if q.data == "settings_back":
+        return await q.message.edit_text(
+            settings_text(),
+            parse_mode="HTML",
+            reply_markup=settings_keyboard(),
+        )
+
+
+# =========================================================
+# SETTINGS INPUT
+# =========================================================
+
+async def settings_input(
+    update,
+    context,
+):
+    if not update.effective_user:
+        return
+
+    if not update.message:
+        return
+
+    uid = update.effective_user.id
+
+    if not admin_ok(uid):
+        return
+
+    # =====================================================
+    # START IMAGE
+    # =====================================================
+
+    if (
+        uid in _pending_image
+        and update.message.photo
+    ):
+        db.set_setting(
+            "start_image",
+            update.message.photo[-1].file_id,
+        )
+
+        _pending_image.discard(
+            uid
+        )
+
+        return await update.message.reply_text(
+            "✅ ꜱᴛᴀʀᴛ ɪᴍᴀɢᴇ "
+            "ᴜᴘᴅᴀᴛᴇᴅ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ."
+        )
+
+    # =====================================================
+    # AUTO DELETE
+    # =====================================================
+
+    if uid in _pending_autodelete:
+        try:
+            minutes = max(
+                0,
+                int(
+                    update.message.text.strip()
+                ),
+            )
+
+            db.set_setting(
+                "auto_delete_minutes",
+                minutes,
+            )
+
+            _pending_autodelete.discard(
+                uid
+            )
+
+            return await update.message.reply_text(
+                f"✅ ᴀᴜᴛᴏ ᴅᴇʟᴇᴛᴇ ꜱᴇᴛ ᴛᴏ "
+                f"{minutes} ᴍɪɴᴜᴛᴇꜱ."
+            )
+
+        except Exception:
+            return await update.message.reply_text(
+                "❌ ꜱᴇɴᴅ ᴀ ᴠᴀʟɪᴅ ɴᴜᴍʙᴇʀ."
+            )
+
+    # =====================================================
+    # ADD / REMOVE ADMIN
+    # =====================================================
+
+    if (
+        uid in _pending_admin
+        or -uid in _pending_admin
+    ):
+        if uid != OWNER_ID:
+            _pending_admin.discard(
+                uid
+            )
+
+            _pending_admin.discard(
+                -uid
+            )
+
+            return await update.message.reply_text(
+                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ "
+                "ᴀᴅᴅ ᴏʀ ʀᴇᴍᴏᴠᴇ ᴀᴅᴍɪɴꜱ."
+            )
+
+        try:
+            target_uid = int(
+                update.message.text.strip()
+            )
+
+        except Exception:
+            return await update.message.reply_text(
+                "❌ ᴇɴᴛᴇʀ ᴀ ᴠᴀʟɪᴅ ᴜꜱᴇʀ ɪᴅ."
+            )
+
+        remove_mode = (
+            -uid in _pending_admin
+        )
+
+        _pending_admin.discard(
+            uid
+        )
+
+        _pending_admin.discard(
+            -uid
+        )
+
+        if remove_mode:
+            db.remove_admin(
+                target_uid
+            )
+
+            return await update.message.reply_text(
+                "✅ ᴀᴅᴍɪɴ ʀᴇᴍᴏᴠᴇᴅ."
+            )
+
+        db.add_admin(
+            target_uid
+        )
+
+        return await update.message.reply_text(
+            "✅ ᴀᴅᴍɪɴ ᴀᴅᴅᴇᴅ."
+        )
+
+    # =====================================================
+    # ADD F-SUB
+    # =====================================================
+
+    if uid in _pending_fsub:
+        if uid != OWNER_ID:
+            _pending_fsub.discard(
+                uid
+            )
+
+            return await update.message.reply_text(
+                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ "
+                "ᴀᴅᴅ ꜰꜱᴜʙ."
+            )
+
+        try:
+            cid = int(
+                update.message.text.strip()
+            )
+
+            chat = await context.bot.get_chat(
+                cid
+            )
+
+            invite = (
+                await context.bot.create_chat_invite_link(
+                    cid,
+                    name="File Store FSub",
+                )
+            )
+
+            db.add_fsub(
+                cid,
+                invite.invite_link,
+                (
+                    chat.title
+                    or chat.username
+                    or str(cid)
+                ),
+            )
+
+            _pending_fsub.discard(
+                uid
+            )
+
+            return await update.message.reply_text(
+                (
+                    f"✅ <b>ꜰꜱᴜʙ ᴀᴅᴅᴇᴅ</b>\n\n"
+                    f'📢 <a href="{escape(invite.invite_link)}">'
+                    f"{escape(chat.title or 'Channel')}"
+                    f"</a>\n"
+                    f"🆔 <code>{cid}</code>\n"
+                    f'🔗 <a href="{escape(invite.invite_link)}">'
+                    f"ɪɴᴠɪᴛᴇ ʟɪɴᴋ</a>"
+                ),
+                parse_mode="HTML",
+            )
+
+        except Exception as e:
+            return await update.message.reply_text(
+                (
+                    "❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ᴀᴅᴅ ᴛʜɪꜱ "
+                    "ᴄʜᴀɴɴᴇʟ.\n"
+                    "ᴍᴀᴋᴇ ꜱᴜʀᴇ ᴛʜᴇ ʙᴏᴛ ɪꜱ ᴀᴅᴍɪɴ.\n\n"
+                    f"<code>{escape(str(e))}</code>"
+                ),
+                parse_mode="HTML",
+            )
+
+    # =====================================================
+    # REMOVE F-SUB
+    # =====================================================
+
+    remkey = (
+        uid * 1000000000
+        + 1
+    )
+
+    if remkey in _pending_fsub:
+        if uid != OWNER_ID:
+            _pending_fsub.discard(
+                remkey
+            )
+
+            return await update.message.reply_text(
+                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ "
+                "ʀᴇᴍᴏᴠᴇ ꜰꜱᴜʙ."
+            )
+
+        try:
+            cid = (
+                update.message.text.strip()
+            )
+
+            db.del_fsub(
+                cid
+            )
+
+            _pending_fsub.discard(
+                remkey
+            )
+
+            return await update.message.reply_text(
+                "✅ ꜰꜱᴜʙ ᴄʜᴀɴɴᴇʟ "
+                "ʀᴇᴍᴏᴠᴇᴅ."
+            )
+
+        except Exception:
+            return await update.message.reply_text(
+                "❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ʀᴇᴍᴏᴠᴇ."
+            )
+
+
+# =========================================================
+# PREMIUM ADD
+# =========================================================
+
+async def addsubs(
+    update,
+    context,
+):
+    if not admin_ok(
+        update.effective_user.id
+    ):
+        return await update.message.reply_text(
+            "❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ."
+        )
+
+    if len(context.args) != 2:
+        return await update.message.reply_text(
+            "ᴜꜱᴀɢᴇ: /ᴀᴅᴅꜱᴜʙꜱ USER_ID DAYS"
+        )
+
+    try:
+        uid = int(
+            context.args[0]
+        )
+
+        days = int(
+            context.args[1]
+        )
+
+        if days <= 0:
+            raise ValueError
+
+    except Exception:
+        return await update.message.reply_text(
+            "❌ ᴜꜱᴇ: /ᴀᴅᴅꜱᴜʙꜱ USER_ID DAYS"
+        )
+
+    try:
+        try:
+            u = await context.bot.get_chat(
+                uid
+            )
+
+            db.add_user(
+                uid,
+                u.username or "",
+                u.first_name or "",
+            )
+
+        except Exception:
+            u = None
+
+        start_time, expiry = (
+            db.add_premium(
+                uid,
+                days,
+            )
+        )
+
+        name = (
+            u.first_name
+            if u
+            else None
+        ) or "ᴜsᴇʀ"
+
+        await context.bot.send_message(
+            uid,
+            (
+                "🎉 <b>Congratulations!</b>\n\n"
+                "Your account has been upgraded to the "
+                f"Premium Ad-Free Tier for the next "
+                f"{days} Days.\n"
+                "Enjoy high-speed bypass-free file downloads!"
+            ),
+            parse_mode="HTML",
+        )
+
+        await update.message.reply_text(
+            (
+                "<b>✅ Premium Tier Activated "
+                "Successfully!</b>\n\n"
+                f"👤 Name: {escape(name)}\n"
+                f"🆔 User ID: {uid}\n"
+                f"⏳ Duration Allocated: {days} Days"
+            ),
+            parse_mode="HTML",
+        )
+
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ {escape(str(e))}"
+        )
+
+
+# =========================================================
+# PREMIUM REMOVE
+# =========================================================
+
+async def removesubs(
+    update,
+    context,
+):
+    if not admin_ok(
+        update.effective_user.id
+    ):
+        return await update.message.reply_text(
+            "❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ."
+        )
+
+    if len(context.args) != 1:
+        return await update.message.reply_text(
+            "ᴜꜱᴀɢᴇ: /ʀᴇᴍᴏᴠᴇꜱᴜʙꜱ USER_ID"
+        )
+
+    try:
+        uid = int(
+            context.args[0]
+        )
+
+    except Exception:
+        return await update.message.reply_text(
+            "❌ ᴇɴᴛᴇʀ ᴀ ᴠᴀʟɪᴅ ᴜꜱᴇʀ ɪᴅ."
+        )
+
+    old = db.remove_premium(
+        uid
+    )
+
+    if old:
+        try:
+            await context.bot.send_message(
+                uid,
+                (
+                    "🚨 <b>Notification:</b> "
+                    "Your premium subscription package has "
+                    "been manually revoked by the management team."
+                ),
+                parse_mode="HTML",
+            )
+
+        except Exception:
+            pass
+
+    await update.message.reply_text(
+        (
+            "✅ ᴘʀᴇᴍɪᴜᴍ ʀᴇᴍᴏᴠᴇᴅ.\n\n"
+            f"ᴜꜱᴇʀ: <code>{uid}</code>"
+        ),
+        parse_mode="HTML",
+    )
+
+
+# =========================================================
+# MY PLAN
+# =========================================================
+
+async def myplan(
+    update,
+    context,
+):
+    uid = update.effective_user.id
+
+    db.add_user(
+        uid,
+        update.effective_user.username
+        or "",
+        update.effective_user.first_name
+        or "",
+    )
+
+    plan = db.get_premium(
+        uid
+    )
+
+    if not plan:
+        return await update.message.reply_text(
+            (
+                "💎 <b>ᴍʏ ᴘʟᴀɴ</b>\n\n"
+                "🔴 ꜱᴛᴀᴛᴜꜱ: ꜰʀᴇᴇ ᴘʟᴀɴ\n\n"
+                "⚡ ꜱʜᴏʀᴛᴇɴᴇʀ ʙʏᴘᴀꜱꜱ: ᴅɪꜱᴀʙʟᴇᴅ\n\n"
+                "💎 ɢᴇᴛ ᴘʀᴇᴍɪᴜᴍ ᴛᴏ ᴇɴᴊᴏʏ "
+                "ꜱʜᴏʀᴛᴇɴᴇʀ-ꜰʀᴇᴇ ᴅᴏᴡɴʟᴏᴀᴅꜱ.\n\n"
+                'ᴄᴏɴᴛᴀᴄᴛ: '
+                '<a href="https://t.me/Its_Lozo">'
+                "@ɪᴛꜱ_ʟᴏᴢᴏ"
+                "</a>"
+            ),
+            parse_mode="HTML",
+            link_preview_options=LinkPreviewOptions(
+                is_disabled=True
+            ),
+        )
+
+    try:
+        start = db._dt(
+            plan["starts_at"]
+        )
+
+        expiry = db._dt(
+            plan["expires_at"]
+        )
+
+        now = datetime.now(
+            timezone.utc
+        )
+
+        if expiry <= now:
+            return await update.message.reply_text(
+                (
+                    "💎 <b>ᴍʏ ᴘʟᴀɴ</b>\n\n"
+                    "🔴 ꜱᴛᴀᴛᴜꜱ: ꜰʀᴇᴍɪᴜᴍ ᴇxᴘɪʀᴇᴅ\n\n"
+                    "⚡ ꜱʜᴏʀᴛᴇɴᴇʀ ʙʏᴘᴀꜱꜱ: ᴅɪꜱᴀʙʟᴇᴅ"
+                ),
+                parse_mode="HTML",
+                link_preview_options=LinkPreviewOptions(
+                    is_disabled=True
+                ),
+            )
+
+        remaining = (
+            expiry - now
+        )
+
+        total_seconds = int(
+            remaining.total_seconds()
+        )
+
+        days = (
+            total_seconds
+            // 86400
+        )
+
+        hours = (
+            total_seconds
+            % 86400
+        ) // 3600
+
+        minutes = (
+            total_seconds
+            % 3600
+        ) // 60
+
+        remaining_text = (
+            (
+                f"{days}d "
+                f"{hours}h "
+                f"{minutes}m"
+            )
+            if days > 0
+            else (
+                f"{hours}h "
+                f"{minutes}m"
+            )
+        )
+
+        user_tz_name = (
+            db.get_user_timezone(
+                uid
+            )
+        )
+
+        try:
+            user_tz = ZoneInfo(
+                user_tz_name
+            )
+
+        except Exception:
+            user_tz_name = (
+                "Asia/Kolkata"
+            )
+
+            user_tz = IST
+
+        local_start = (
+            start.astimezone(
+                user_tz
+            )
+        )
+
+        local_expiry = (
+            expiry.astimezone(
+                user_tz
+            )
+        )
+
+        tz_label = (
+            timezone_display_name(
+                user_tz_name
+            )
+        )
+
+        return await update.message.reply_text(
+            (
+                "💎 <b>ᴍʏ ᴘʟᴀɴ</b>\n\n"
+                "🟢 ꜱᴛᴀᴛᴜꜱ: ᴘʀᴇᴍɪᴜᴍ ᴀᴄᴛɪᴠᴇ\n\n"
+                f"🌍 ᴛɪᴍᴇᴢᴏɴᴇ: <b>{tz_label}</b>\n\n"
+                f"📅 ᴀᴄᴛɪᴠᴀᴛᴇᴅ ᴏɴ: "
+                f"<code>{local_start.strftime('%d-%m-%Y %I:%M:%S %p')}</code>\n"
+                f"⏳ ᴇxᴘɪʀᴇꜱ ᴏɴ: "
+                f"<code>{local_expiry.strftime('%d-%m-%Y %I:%M:%S %p')}</code>\n"
+                f"⏱ ᴛɪᴍᴇ ʀᴇᴍᴀɪɴɪɴɢ: "
+                f"<b>{remaining_text}</b>\n\n"
+                "⚡ ꜱʜᴏʀᴛᴇɴᴇʀ ʙʏᴘᴀꜱꜱ: "
+                "🟢 ᴇɴᴀʙʟᴇᴅ\n\n"
+                "💎 ᴛʜᴀɴᴋ ʏᴏᴜ ꜰᴏʀ ᴜsɪɴɢ ᴘʀᴇᴍɪᴜᴍ!"
+            ),
+            parse_mode="HTML",
+            link_preview_options=LinkPreviewOptions(
+                is_disabled=True
+            ),
+        )
+
+    except Exception:
+        log.exception(
+            "Myplan failed"
+        )
+
+        return await update.message.reply_text(
+            "❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ʟᴏᴀᴅ "
+            "ʏᴏᴜʀ ᴘʟᴀɴ ᴅᴇᴛᴀɪʟꜱ."
+        )
+
+
+# =========================================================
+# PREMIUM LIST
+# ALWAYS IST
+# =========================================================
+
+async def list_premium(
+    update,
+    context,
+):
+    if not admin_ok(
+        update.effective_user.id
+    ):
+        return await update.message.reply_text(
+            "❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ."
+        )
+
+    rows = db.list_premium()
+
+    if not rows:
+        return await update.message.reply_text(
+            "📋 ɴᴏ ᴀᴄᴛɪᴠᴇ ᴘʀᴇᴍɪᴜᴍ "
+            "ꜱᴜʙꜱᴄʀɪᴘᴛɪᴏɴꜱ."
+        )
+
+    users_cache = {
+        int(x["user_id"]): x
+        for x in db.list_users()
+    }
+
+    lines = [
+        "<b>💎 ᴘʀᴇᴍɪᴜᴍ ꜱᴜʙꜱᴄʀɪʙᴇʀꜱ</b>",
+        "",
+    ]
+
+    for i, r in enumerate(
+        rows,
+        1,
+    ):
+        uid = int(
+            r["user_id"]
+        )
+
+        u = users_cache.get(
+            uid,
+            {},
+        )
+
+        def fmt(value):
+            return (
+                db._dt(value)
+                .astimezone(IST)
+                .strftime(
+                    "%d-%m-%Y %I:%M:%S %p"
+                )
+            )
+
+        name = (
+            u.get(
+                "first_name"
+            )
+            or "User"
+        )
+
+        username = (
+            "@"
+            + u.get("username")
+            if u.get("username")
+            else "—"
+        )
+
+        lines.append(
+            (
+                f"<b>#{i}</b>\n"
+                f'👤 <a href="tg://user?id={uid}">'
+                f"{escape(name)}</a>\n"
+                f"🔹 Username: {escape(username)}\n"
+                f"🆔 User ID: <code>{uid}</code>\n"
+                f"🟢 Start: <code>"
+                f"{fmt(r.get('starts_at', r['expires_at']))}"
+                f" IST</code>\n"
+                f"🔴 End: <code>"
+                f"{fmt(r['expires_at'])}"
+                f" IST</code>\n"
+            )
+        )
+
+    text = "\n".join(
+        lines
+    )
+
+    for pos in range(
+        0,
+        len(text),
+        3900,
+    ):
+        await update.message.reply_text(
+            text[
+                pos:pos + 3900
+            ],
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+
+
+# =========================================================
+# BAN USER
+# =========================================================
+
+async def banuser(
+    update,
+    context,
+):
+    uid = update.effective_user.id
+
+    if not admin_ok(uid):
+        return await update.message.reply_text(
+            "❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ."
+        )
+
+    if len(context.args) != 1:
+        return await update.message.reply_text(
+            "❌ ᴜꜱᴀɢᴇ:\n/banuser USER_ID"
+        )
+
+    try:
+        target_id = int(
+            context.args[0]
+        )
+
+    except ValueError:
+        return await update.message.reply_text(
+            "❌ ᴘʟᴇᴀꜱᴇ ᴇɴᴛᴇʀ "
+            "ᴀ ᴠᴀʟɪᴅ ᴜꜱᴇʀ ɪᴅ."
+        )
+
+    if target_id == OWNER_ID:
+        return await update.message.reply_text(
+            "❌ ᴏᴡɴᴇʀ ᴄᴀɴɴᴏᴛ "
+            "ʙᴇ ʙᴀɴɴᴇᴅ."
+        )
+
+    if db.is_banned(
+        target_id
+    ):
+        return await update.message.reply_text(
+            "⚠️ ᴛʜɪꜱ ᴜꜱᴇʀ "
+            "ɪs ᴀʟʀᴇᴀᴅʏ ʙᴀɴɴᴇᴅ."
+        )
+
+    db.ban_user(
+        target_id,
+        reason="Manual Ban",
+    )
+
+    try:
+        await context.bot.send_message(
+            target_id,
+            "🚫 <b>You Are Banned From Using The Bot</b> 🚫",
+            parse_mode="HTML",
+        )
+
+    except Exception:
+        pass
+
+    await update.message.reply_text(
+        (
+            "✅ <b>ᴜꜱᴇʀ ʙᴀɴɴᴇᴅ "
+            "ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ.</b>\n\n"
+            f"🆔 <code>{target_id}</code>"
+        ),
+        parse_mode="HTML",
+    )
+
+
+# =========================================================
+# UNBAN USER
+# =========================================================
+
+async def unbanuser(
+    update,
+    context,
+):
+    uid = update.effective_user.id
+
+    if not admin_ok(uid):
+        return await update.message.reply_text(
+            "❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ."
+        )
+
+    if len(context.args) != 1:
+        return await update.message.reply_text(
+            "❌ ᴜꜱᴀɢᴇ:\n/unbanuser USER_ID"
+        )
+
+    try:
+        target_id = int(
+            context.args[0]
+        )
+
+    except ValueError:
+        return await update.message.reply_text(
+            "❌ ᴘʟᴇᴀꜱᴇ ᴇɴᴛᴇʀ "
+            "ᴀ ᴠᴀʟɪᴅ ᴜꜱᴇʀ ɪᴅ."
+        )
+
+    if not db.is_banned(
+        target_id
+    ):
+        return await update.message.reply_text(
+            "⚠️ ᴛʜɪꜱ ᴜꜱᴇʀ "
+            "ɪs ɴᴏᴛ ʙᴀɴɴᴇᴅ."
+        )
+
+    db.unban_user(
+        target_id
+    )
+
+    try:
+        await context.bot.send_message(
+            target_id,
+            (
+                "✅ <b>Your ban has been removed.</b>\n\n"
+                "You can use the bot again."
+            ),
+            parse_mode="HTML",
+        )
+
+    except Exception:
+        pass
+
+    await update.message.reply_text(
+        (
+            "✅ <b>ᴜꜱᴇʀ ᴜɴʙᴀɴɴᴇᴅ "
+            "ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟʟʏ.</b>\n\n"
+            f"🆔 <code>{target_id}</code>"
+        ),
+        parse_mode="HTML",
+    )
+
+
+# =========================================================
+# BANNED USER LIST
+# =========================================================
+
+async def banuser_list(
+    update,
+    context,
+):
+    uid = update.effective_user.id
+
+    if not admin_ok(uid):
+        return await update.message.reply_text(
+            "❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ."
+        )
+
+    banned_users = (
+        db.list_banned_users()
+    )
+
+    if not banned_users:
+        return await update.message.reply_text(
+            (
+                "📋 <b>ʙᴀɴɴᴇᴅ ᴜꜱᴇʀ ʟɪꜱᴛ</b>\n\n"
+                "✅ ɴᴏ ᴜꜱᴇʀ ɪs "
+                "ᴄᴜʀʀᴇɴᴛʟʏ ʙᴀɴɴᴇᴅ."
+            ),
+            parse_mode="HTML",
+        )
+
+    lines = [
+        "🚫 <b>ʙᴀɴɴᴇᴅ ᴜꜱᴇʀꜱ</b>",
+        "",
+    ]
+
+    for i, row in enumerate(
+        banned_users,
+        1,
+    ):
+        user_id = int(
+            row["user_id"]
+        )
+
+        try:
+            user = await context.bot.get_chat(
+                user_id
+            )
+
+            name = (
+                user.full_name
+                or "Unknown"
+            )
+
+            username = (
+                "@"
+                + user.username
+                if user.username
+                else "No Username"
+            )
+
+        except Exception:
+            name = "Unknown"
+            username = "No Username"
+
+        profile_link = (
+            f'<a href="tg://user?id={user_id}">'
+            f"{escape(name)}</a>"
+        )
+
+        reason = (
+            row.get("reason")
+            or "Manual Ban"
+        )
+
+        banned_at = row.get(
+            "banned_at"
+        )
+
+        if banned_at:
+            try:
+                banned_time = (
+                    db._dt(
+                        banned_at
+                    )
+                    .astimezone(IST)
+                    .strftime(
+                        "%d-%m-%Y %I:%M:%S %p"
+                    )
+                )
+
+            except Exception:
+                banned_time = "—"
+
+        else:
+            banned_time = "—"
+
+        lines.append(
+            (
+                f"<b>{i}.</b> {profile_link}\n"
+                f"👤 Name: <code>{escape(name)}</code>\n"
+                f"🔗 Username: {escape(username)}\n"
+                f"🆔 UID: <code>{user_id}</code>\n"
+                f"⚠️ Reason: <code>{escape(str(reason))}</code>\n"
+                f"🕐 Banned: <code>{banned_time} IST</code>\n"
+                f"━━━━━━━━━━━━━━"
+            )
+        )
+
+    text = "\n".join(
+        lines
+    )
+
+    if len(text) <= 4000:
+        return await update.message.reply_text(
+            text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+
+    chunk = ""
+
+    for line in lines:
+        if (
+            len(chunk)
+            + len(line)
+            + 1
+            > 4000
+        ):
+            await update.message.reply_text(
+                chunk,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+
+            chunk = ""
+
+        chunk += (
+            line
+            + "\n"
+        )
+
+    if chunk:
+        await update.message.reply_text(
+            chunk,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+
+
+# =========================================================
+# USERS
+# =========================================================
+
+async def users(
+    update,
+    context,
+):
+    if not admin_ok(
+        update.effective_user.id
+    ):
+        return await update.message.reply_text(
+            "❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ."
+        )
+
+    rows = db.list_users()
+
+    lines = [
+        f"<b>👥 ᴜꜱᴇʀꜱ: {len(rows)}</b>",
+        "",
+    ]
+
+    for r in rows:
+        uid = int(
+            r["user_id"]
+        )
+
+        name = (
+            r.get(
+                "first_name"
+            )
+            or "User"
+        )
+
+        username = (
+            "@"
+            + r["username"]
+            if r.get("username")
+            else "—"
+        )
+
+        lines.append(
+            (
+                f'• <a href="tg://user?id={uid}">'
+                f"{escape(name)}</a> | "
+                f"{escape(username)} | "
+                f"<code>{uid}</code>"
+            )
+        )
+
+    text = "\n".join(
+        lines
+    )
+
+    for pos in range(
+        0,
+        len(text),
+        3900,
+    ):
+        await update.message.reply_text(
+            text[
+                pos:pos + 3900
+            ],
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+
+
+# =========================================================
+# BROADCAST
+# =========================================================
+
+async def broadcast(
+    update,
+    context,
+):
+    if not admin_ok(
+        update.effective_user.id
+    ):
+        return await update.message.reply_text(
+            "❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ."
+        )
+
+    replied = (
+        update.message.reply_to_message
+    )
+
+    if not replied:
+        return await update.message.reply_text(
+            (
+                "ʀᴇᴘʟʏ ᴛᴏ ᴛʜᴇ ᴍᴇꜱꜱᴀɢᴇ "
+                "ʏᴏᴜ ᴡᴀɴᴛ ᴛᴏ ʙʀᴏᴀᴅᴄᴀꜱᴛ.\n\n"
+                "/ʙʀᴏᴀᴅᴄᴀꜱᴛ\n"
+                "/ʙʀᴏᴀᴅᴄᴀꜱᴛ 24ʜ"
+            )
+        )
+
+    arg = (
+        context.args[0].lower()
+        if context.args
+        else ""
+    )
+
+    delete_after = None
+
+    mode = "BROADCAST"
+
+    lifespan = "Permanent"
+
+    if arg.endswith("h"):
+        try:
+            hours = int(
+                arg[:-1]
+            )
+
+            delete_after = (
+                datetime.now(
+                    timezone.utc
+                )
+                + timedelta(
+                    hours=hours
+                )
+            )
+
+            mode = "PBROADCAST"
+
+            lifespan = arg
+
+        except Exception:
+            pass
+
+    rows = db.list_users()
+
+    total = len(rows)
+
+    success = 0
+
+    blocked = 0
+
+    failed = 0
+
+    sent = []
+
+    for r in rows:
+        uid = int(
+            r["user_id"]
+        )
+
+        try:
+            message = await context.bot.copy_message(
+                uid,
+                replied.chat_id,
+                replied.message_id,
+            )
+
+            success += 1
+
+            sent.append(
+                (
+                    uid,
+                    message.message_id,
+                )
+            )
+
+        except Exception as e:
+            if (
+                "blocked"
+                in str(e).lower()
+                or "chat not found"
+                in str(e).lower()
+            ):
+                blocked += 1
+
+                try:
+                    db.delete_user(
+                        uid
+                    )
+                except Exception:
+                    pass
+
+            else:
+                failed += 1
+
+    if delete_after:
+
+        async def delete_broadcast_job(
+            ctx
+        ):
+            for (
+                user_id,
+                message_id,
+            ) in sent:
+                try:
+                    await ctx.bot.delete_message(
+                        user_id,
+                        message_id,
+                    )
+
+                except Exception:
+                    pass
+
+        delay = max(
+            1,
+            (
+                delete_after
+                - datetime.now(
+                    timezone.utc
+                )
+            ).total_seconds(),
+        )
+
+        context.job_queue.run_once(
+            delete_broadcast_job,
+            delay,
+        )
+
+    stats = (
+        "📢 <b>BROADCAST COMPLETED!</b>\n\n"
+        "📊 <b>Stats Report:</b>\n"
+        f"• Total Users DB: {total}\n"
+        f"• Successful: {success}\n"
+        f"• Blocked Users Wiped: {blocked}\n"
+        "• Deleted Accounts Wiped: 0\n"
+        f"• Unsuccessful/Failed: {failed}\n\n"
+        f"⚙️ Config Mode: {mode}\n"
+        f"⏱ Task Lifespan: {lifespan}"
+    )
+
+    await update.message.reply_text(
+        stats,
+        parse_mode="HTML",
+    )
+
+
+# =========================================================
+# DB CHANNEL INDEXER
+# =========================================================
+
+async def channel_post_indexer(
+    update,
+    context,
+):
+    post = update.channel_post
+
+    if (
+        not post
+        or post.chat_id != DB_CHANNEL_ID
+    ):
+        return
+
+    try:
+        db.add_file(
+            DB_CHANNEL_ID,
+            post.message_id,
+            post.caption
+            or post.text
+            or "",
+        )
+
+        token = db.create_main_link(
+            (
+                f"message:"
+                f"{DB_CHANNEL_ID}:"
+                f"{post.message_id}"
+            )
+        )
+
+        url = main_link_url(
+            token
+        )
+
+        markup = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "↗ ꜱʜᴀʀᴇ ᴜʀʟ",
+                        url=share_url(url),
+                    )
+                ]
+            ]
+        )
+
+        try:
+            await context.bot.edit_message_reply_markup(
+                chat_id=DB_CHANNEL_ID,
+                message_id=post.message_id,
+                reply_markup=markup,
+            )
+
+        except Exception:
+            log.exception(
+                "Could not add share button "
+                "to DB message"
+            )
+
+    except Exception:
+        log.exception(
+            "DB channel indexing failed"
+        )
 
 
 # =========================================================
@@ -2484,178 +3199,179 @@ async def error_handler(
 # =========================================================
 
 def main():
+
     threading.Thread(
         target=start_health_server,
         daemon=True,
     ).start()
 
-    application = (
+    app = (
         Application.builder()
         .token(BOT_TOKEN)
         .build()
     )
 
-    # ---------------------------------------------
-    # BAN GUARD
-    # ---------------------------------------------
+    # =====================================================
+    # GLOBAL BAN GUARD
+    # =====================================================
 
-    application.add_handler(
+    app.add_handler(
         MessageHandler(
             filters.ALL,
             ban_guard,
         ),
-        group=-10,
+        group=-1,
     )
 
-    # ---------------------------------------------
-    # COMMANDS
-    # ---------------------------------------------
+    # =====================================================
+    # COMMAND HANDLERS
+    # =====================================================
 
-    application.add_handler(
+    app.add_handler(
         CommandHandler(
             "start",
-            start_command,
+            start,
         )
     )
 
-    application.add_handler(
+    app.add_handler(
         CommandHandler(
             "genlink",
-            genlink_command,
+            genlink,
         )
     )
 
-    application.add_handler(
+    app.add_handler(
         CommandHandler(
             "batch",
-            batch_command,
+            batch,
         )
     )
 
-    application.add_handler(
+    app.add_handler(
         CommandHandler(
             "settings",
-            settings_command,
+            settings,
         )
     )
 
-    application.add_handler(
+    app.add_handler(
         CommandHandler(
             "banuser",
-            banuser_command,
+            banuser,
         )
     )
 
-    application.add_handler(
+    app.add_handler(
         CommandHandler(
             "unbanuser",
-            unbanuser_command,
+            unbanuser,
         )
     )
 
-    application.add_handler(
+    app.add_handler(
         CommandHandler(
             "banuser_list",
-            banuser_list_command,
+            banuser_list,
         )
     )
 
-    application.add_handler(
+    app.add_handler(
         CommandHandler(
             "addsubs",
-            addsubs_command,
+            addsubs,
         )
     )
 
-    application.add_handler(
+    app.add_handler(
         CommandHandler(
             "removesubs",
-            removesubs_command,
+            removesubs,
         )
     )
 
-    application.add_handler(
+    app.add_handler(
         CommandHandler(
             "list_premium",
-            list_premium_command,
+            list_premium,
         )
     )
 
-    application.add_handler(
-        CommandHandler(
-            "myplan",
-            myplan_command,
-        )
-    )
-
-    application.add_handler(
+    app.add_handler(
         CommandHandler(
             "users",
-            users_command,
+            users,
         )
     )
 
-    application.add_handler(
+    app.add_handler(
         CommandHandler(
             "broadcast",
-            broadcast_command,
+            broadcast,
         )
     )
 
-    application.add_handler(
+    app.add_handler(
+        CommandHandler(
+            "myplan",
+            myplan,
+        )
+    )
+
+    # =====================================================
+    # TIMEZONE
+    # =====================================================
+
+    app.add_handler(
         CommandHandler(
             "timezone",
             timezone_command,
         )
     )
 
-    # ---------------------------------------------
-    # CALLBACKS
-    # ---------------------------------------------
+    # =====================================================
+    # CALLBACK
+    # =====================================================
 
-    application.add_handler(
+    app.add_handler(
         CallbackQueryHandler(
-            callback_handler
+            callback
         )
     )
 
-    # ---------------------------------------------
+    # =====================================================
     # SETTINGS INPUT
-    # ---------------------------------------------
+    # =====================================================
 
-    application.add_handler(
+    app.add_handler(
         MessageHandler(
-            filters.ALL
-            & ~filters.COMMAND
-            & ~filters.UpdateType.CHANNEL_POST,
-            settings_input_handler,
+            filters.PHOTO
+            | (
+                filters.TEXT
+                & ~filters.COMMAND
+            ),
+            settings_input,
         ),
         group=1,
     )
 
-    # ---------------------------------------------
+    # =====================================================
     # DB CHANNEL INDEXER
-    # ---------------------------------------------
+    # =====================================================
 
-    application.add_handler(
+    app.add_handler(
         MessageHandler(
-            filters.UpdateType.CHANNEL_POST,
+            filters.ALL,
             channel_post_indexer,
         ),
         group=10,
     )
 
-    application.add_error_handler(
-        error_handler
+    log.info(
+        "Bot starting"
     )
 
-    logger.info(
-        "Starting bot @%s | BOT_ID=%s",
-        BOT_USERNAME,
-        getattr(db, "bot_id", "unknown"),
-    )
-
-    application.run_polling(
+    app.run_polling(
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=True,
         close_loop=False,

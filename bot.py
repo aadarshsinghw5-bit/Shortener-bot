@@ -461,17 +461,35 @@ async def disable_copied_message_preview(
     message,
 ):
     """
-    Disable Telegram URL preview on a copied message.
+    Disable Telegram URL preview for an already sent text message.
 
-    Handles:
-        - normal text messages
-        - media messages with captions
-
-    Other message types are returned unchanged.
+    NOTE:
+    Telegram does not reliably allow link_preview_options on
+    media captions through edit_message_caption().
     """
 
     if not message:
         return message
+
+    try:
+        if message.text:
+            return await bot.edit_message_text(
+                chat_id=message.chat_id,
+                message_id=message.message_id,
+                text=message.text,
+                entities=message.entities,
+                link_preview_options=LinkPreviewOptions(
+                    is_disabled=True
+                ),
+                reply_markup=message.reply_markup,
+            )
+
+    except Exception:
+        log.exception(
+            "Could not disable URL preview"
+        )
+
+    return message
 
     try:
         # -------------------------------------------------
@@ -605,22 +623,48 @@ async def genlink(
         )
 
     try:
-        # -------------------------------------------------
-        # COPY FILE TO DB CHANNEL
-        # -------------------------------------------------
-        copied = await context.bot.copy_message(
-            chat_id=DB_CHANNEL_ID,
-            from_chat_id=replied.chat_id,
-            message_id=replied.message_id,
-        )
+        # =================================================
+        # PLAIN TEXT / URL MESSAGE
+        # =================================================
+        #
+        # IMPORTANT:
+        # Do NOT use copy_message() here.
+        #
+        # copy_message() can create the URL preview before
+        # we get a chance to disable it.
+        #
+        # send_message() with LinkPreviewOptions prevents
+        # the preview from being created in the first place.
+        # =================================================
 
-        # -------------------------------------------------
-        # DISABLE URL PREVIEW IN DB CHANNEL
-        # -------------------------------------------------
-        copied = await disable_copied_message_preview(
-            context.bot,
-            copied,
-        )
+        if replied.text:
+            copied = await context.bot.send_message(
+                chat_id=DB_CHANNEL_ID,
+                text=replied.text,
+                entities=replied.entities,
+                link_preview_options=LinkPreviewOptions(
+                    is_disabled=True
+                ),
+            )
+
+        # =================================================
+        # ALL OTHER MESSAGE TYPES
+        # =================================================
+        else:
+            copied = await context.bot.copy_message(
+                chat_id=DB_CHANNEL_ID,
+                from_chat_id=replied.chat_id,
+                message_id=replied.message_id,
+            )
+
+            copied = await disable_copied_message_preview(
+                context.bot,
+                copied,
+            )
+
+        # =================================================
+        # SAVE DB RECORD
+        # =================================================
 
         db.add_file(
             DB_CHANNEL_ID,
@@ -637,6 +681,10 @@ async def genlink(
             )
             or "",
         )
+
+        # =================================================
+        # CREATE MAIN LINK
+        # =================================================
 
         main = db.create_main_link(
             (
@@ -661,14 +709,25 @@ async def genlink(
             ]
         )
 
+        # =================================================
+        # ADD SHARE BUTTON TO DB MESSAGE
+        # =================================================
+
         try:
             await context.bot.edit_message_reply_markup(
-                DB_CHANNEL_ID,
-                copied.message_id,
+                chat_id=DB_CHANNEL_ID,
+                message_id=copied.message_id,
                 reply_markup=markup,
             )
+
         except Exception:
-            pass
+            log.exception(
+                "Could not add share button to genlink message"
+            )
+
+        # =================================================
+        # SEND GENERATED LINK TO ADMIN
+        # =================================================
 
         await update.message.reply_text(
             (
@@ -953,15 +1012,19 @@ async def deliver_target(
             2,
         )
 
+        # -------------------------------------------------
+        # First copy the DB message.
+        #
+        # For a normal text/URL message, Telegram's copied
+        # message can be edited to disable preview.
+        # -------------------------------------------------
+
         message = await bot.copy_message(
             chat_id=chat_id,
             from_chat_id=int(cid),
             message_id=int(mid),
         )
 
-        # -------------------------------------------------
-        # DISABLE URL PREVIEW FOR USER
-        # -------------------------------------------------
         message = await disable_copied_message_preview(
             bot,
             message,
@@ -1002,9 +1065,6 @@ async def deliver_target(
                     ),
                 )
 
-                # -----------------------------------------
-                # DISABLE URL PREVIEW FOR USER
-                # -----------------------------------------
                 message = await disable_copied_message_preview(
                     bot,
                     message,

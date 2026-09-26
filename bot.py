@@ -1082,22 +1082,25 @@ async def deliver_target(
     return ids
 
 
-async def delete_delivered(
-    context,
-):
+async def delete_delivered(context):
     data = context.job.data
 
-    for mid in data[
-        "message_ids"
-    ]:
+    chat_id = data["chat_id"]
+    message_ids = data["message_ids"]
+
+    for mid in message_ids:
         try:
             await context.bot.delete_message(
-                data["chat_id"],
-                mid,
+                chat_id=chat_id,
+                message_id=mid,
             )
-
-        except Exception:
-            pass
+        except Exception as e:
+            log.exception(
+                "Auto-delete failed: chat_id=%s message_id=%s error=%s",
+                chat_id,
+                mid,
+                e,
+            )
 
 
 def auto_delete_minutes():
@@ -1111,7 +1114,6 @@ def auto_delete_minutes():
                 )
             ),
         )
-
     except Exception:
         return 10
 
@@ -1131,31 +1133,45 @@ async def deliver_and_notify(
 
     mins = auto_delete_minutes()
 
-    if mins > 0:
-        msg = await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=(
-                f"ᴛʜɪs ꜰɪʟᴇ ɪs ᴅᴇʟᴇᴛɪɴɢ "
-                f"ᴀᴜᴛᴏᴍᴀᴛɪᴄᴀʟʟʏ ɪɴ "
-                f"{mins} ᴍɪɴᴜᴛᴇꜱ.\n\n"
-                "ꜰᴏʀᴡᴀʀᴅ ɪᴛ ᴛᴏ ʏᴏᴜʀ "
-                "ꜱᴀᴠᴇᴅ ᴍᴇꜱꜱᴀɢᴇꜱ..!"
-            ),
-        )
+    if mins <= 0:
+        return
 
-        ids.append(
-            msg.message_id
-        )
+    chat_id = update.effective_chat.id
 
+    msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            f"ᴛʜɪs ꜰɪʟᴇ ɪs ᴅᴇʟᴇᴛɪɴɢ "
+            f"ᴀᴜᴛᴏᴍᴀᴛɪᴄᴀʟʟʏ ɪɴ "
+            f"{mins} ᴍɪɴᴜᴛᴇꜱ.\n\n"
+            "ꜰᴏʀᴡᴀʀᴅ ɪᴛ ᴛᴏ ʏᴏᴜʀ "
+            "ꜱᴀᴠᴇᴅ ᴍᴇꜱꜱᴀɢᴇꜱ..!"
+        ),
+    )
+
+    ids.append(msg.message_id)
+
+    try:
         context.job_queue.run_once(
             delete_delivered,
-            mins * 60,
+            when=mins * 60,
             data={
-                "chat_id": (
-                    update.effective_chat.id
-                ),
+                "chat_id": chat_id,
                 "message_ids": ids,
             },
+            name=f"auto_delete_{chat_id}_{msg.message_id}",
+        )
+
+        log.info(
+            "Auto-delete scheduled: chat_id=%s messages=%s after=%s minutes",
+            chat_id,
+            ids,
+            mins,
+        )
+
+    except Exception:
+        log.exception(
+            "Could not schedule auto-delete"
         )
 
 

@@ -2342,6 +2342,49 @@ async def settings_input(
                 "❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ʀᴇᴍᴏᴠᴇ."
             )
 
+async def expire_premium(context):
+    data = context.job.data
+
+    uid = int(data["user_id"])
+
+    try:
+        premium = db.get_premium(uid)
+
+        if not premium:
+            return
+
+        expiry = db._dt(premium["expires_at"])
+        now = datetime.now(timezone.utc)
+
+        # Agar expiry abhi nahi hui hai, safety ke liye dobara schedule.
+        if expiry > now:
+            delay = max(
+                1,
+                (expiry - now).total_seconds(),
+            )
+
+            context.job_queue.run_once(
+                expire_premium,
+                when=delay,
+                data={
+                    "user_id": uid,
+                },
+                name=f"premium_expiry_{uid}",
+            )
+            return
+
+        db.remove_premium(uid)
+
+        log.info(
+            "Premium expired and removed for user %s",
+            uid,
+        )
+
+    except Exception:
+        log.exception(
+            "Premium expiry failed for user %s",
+            uid,
+        )
 
 # =========================================================
 # PREMIUM ADD
@@ -2395,11 +2438,28 @@ async def addsubs(
         except Exception:
             u = None
 
-        start_time, expiry = (
+                start_time, expiry = (
             db.add_premium(
                 uid,
                 days,
             )
+        )
+
+        delay = max(
+            1,
+            (
+                db._dt(expiry)
+                - datetime.now(timezone.utc)
+            ).total_seconds(),
+        )
+
+        context.job_queue.run_once(
+            expire_premium,
+            when=delay,
+            data={
+                "user_id": uid,
+            },
+            name=f"premium_expiry_{uid}",
         )
 
         name = (

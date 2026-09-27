@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import quote
 from html import escape
+from functools import wraps
 
 from dotenv import load_dotenv
 
@@ -107,6 +108,34 @@ _pending_admin = set()
 
 _pending_fsub = set()
 
+# =========================================================
+# COMMAND WAIT MESSAGE
+# =========================================================
+
+def with_wait(wait_text="ᴘʟᴇᴀꜱᴇ ᴡᴀɪᴛ....."):
+    def decorator(handler):
+        @wraps(handler)
+        async def wrapped(update, context):
+            wait_message = None
+
+            try:
+                if update.message:
+                    wait_message = await update.message.reply_text(
+                        wait_text
+                    )
+
+                return await handler(update, context)
+
+            finally:
+                if wait_message:
+                    try:
+                        await wait_message.delete()
+                    except Exception:
+                        pass
+
+        return wrapped
+
+    return decorator
 
 # =========================================================
 # HEALTH SERVER
@@ -3448,95 +3477,104 @@ def main():
     # =====================================================
 
     app.add_handler(
-        CommandHandler(
-            "start",
-            start,
-        )
+    CommandHandler(
+        "start",
+        with_wait("ᴘʟᴇᴀꜱᴇ ᴡᴀɪᴛ.....")(start),
     )
+)
 
-    app.add_handler(
-        CommandHandler(
-            "genlink",
-            genlink,
-        )
+app.add_handler(
+    CommandHandler(
+        "genlink",
+        with_wait("ɢᴇɴᴇʀᴀᴛɪɴɢ ʟɪɴᴋ...")(genlink),
     )
+)
 
-    app.add_handler(
-        CommandHandler(
-            "batch",
-            batch,
-        )
+app.add_handler(
+    CommandHandler(
+        "batch",
+        with_wait("ɢᴇɴᴇʀᴀᴛɪɴɢ ʟɪɴᴋ...")(batch),
     )
+)
 
-    app.add_handler(
-        CommandHandler(
-            "settings",
-            settings,
-        )
+app.add_handler(
+    CommandHandler(
+        "settings",
+        with_wait("ᴘʟᴇᴀꜱᴇ ᴡᴀɪᴛ.....")(settings),
     )
+)
 
-    app.add_handler(
-        CommandHandler(
-            "banuser",
-            banuser,
-        )
+app.add_handler(
+    CommandHandler(
+        "banuser",
+        with_wait("ᴘʟᴇᴀꜱᴇ ᴡᴀɪᴛ.....")(banuser),
     )
+)
 
-    app.add_handler(
-        CommandHandler(
-            "unbanuser",
-            unbanuser,
-        )
+app.add_handler(
+    CommandHandler(
+        "unbanuser",
+        with_wait("ᴘʟᴇᴀꜱᴇ ᴡᴀɪᴛ.....")(unbanuser),
     )
+)
 
-    app.add_handler(
-        CommandHandler(
-            "banuser_list",
-            banuser_list,
-        )
+app.add_handler(
+    CommandHandler(
+        "banuser_list",
+        with_wait("ᴘʟᴇᴀꜱᴇ ᴡᴀɪᴛ.....")(banuser_list),
     )
+)
 
-    app.add_handler(
-        CommandHandler(
-            "addsubs",
-            addsubs,
-        )
+app.add_handler(
+    CommandHandler(
+        "addsubs",
+        with_wait("ᴘʟᴇᴀꜱᴇ ᴡᴀɪᴛ.....")(addsubs),
     )
+)
 
-    app.add_handler(
-        CommandHandler(
-            "removesubs",
-            removesubs,
-        )
+app.add_handler(
+    CommandHandler(
+        "removesubs",
+        with_wait("ᴘʟᴇᴀꜱᴇ ᴡᴀɪᴛ.....")(removesubs),
     )
+)
 
-    app.add_handler(
-        CommandHandler(
-            "list_premium",
-            list_premium,
-        )
+app.add_handler(
+    CommandHandler(
+        "list_premium",
+        with_wait(
+            "ꜰᴇᴛᴄʜɪɴɢ ᴘʀᴇᴍɪᴜᴍ ᴜꜱᴇʀꜱ ʟɪꜱᴛ...."
+        )(list_premium),
     )
+)
 
-    app.add_handler(
-        CommandHandler(
-            "users",
-            users,
-        )
+app.add_handler(
+    CommandHandler(
+        "users",
+        with_wait("ꜰᴇᴛᴄʜɪɴɢ ᴜꜱᴇʀꜱ....")(users),
     )
+)
 
-    app.add_handler(
-        CommandHandler(
-            "broadcast",
-            broadcast,
-        )
+app.add_handler(
+    CommandHandler(
+        "broadcast",
+        with_wait("ᴘʟᴇᴀꜱᴇ ᴡᴀɪᴛ.....")(broadcast),
     )
+)
 
-    app.add_handler(
-        CommandHandler(
-            "myplan",
-            myplan,
-        )
+app.add_handler(
+    CommandHandler(
+        "myplan",
+        with_wait("ᴘʟᴇᴀꜱᴇ ᴡᴀɪᴛ.....")(myplan),
     )
+)
+
+app.add_handler(
+    CommandHandler(
+        "timezone",
+        with_wait("ᴘʟᴇᴀꜱᴇ ᴡᴀɪᴛ.....")(timezone_command),
+    )
+)
 
     # =====================================================
     # TIMEZONE

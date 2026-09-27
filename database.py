@@ -560,27 +560,27 @@ class Database:
         return row
 
     def list_premium(self):
-    now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
 
-    # Remove all expired premium subscriptions
+        # Remove expired premium users
     self.premium.delete_many(
-        {
-            "expires_at": {
-                "$lte": now
+            {
+                "expires_at": {
+                    "$lte": now
+                }
             }
-        }
-    )
+        )
 
-    # Return only active premium users
-    return list(
-        self.premium.find(
-            {},
-            {"_id": 0},
-        ).sort(
+        # Return only active premium users
+        return list(
+            self.premium.find(
+                {},
+                {"_id": 0},
+            ).sort(
             "expires_at",
             ASCENDING,
+            )
         )
-    )
 
     def is_premium(self, user_id):
         return self.get_premium(user_id) is not None

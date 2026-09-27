@@ -572,7 +572,7 @@ class Database:
         )
 
         # Return only active premium users
-        return list(
+    return list(
             self.premium.find(
                 {},
                 {"_id": 0},

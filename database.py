@@ -563,7 +563,7 @@ class Database:
         now = datetime.now(timezone.utc)
 
         # Remove expired premium users
-    self.premium.delete_many(
+        self.premium.delete_many(
             {
                 "expires_at": {
                     "$lte": now
@@ -572,13 +572,13 @@ class Database:
         )
 
         # Return only active premium users
-    return list(
+        return list(
             self.premium.find(
                 {},
                 {"_id": 0},
             ).sort(
-            "expires_at",
-            ASCENDING,
+                "expires_at",
+                ASCENDING,
             )
         )
 

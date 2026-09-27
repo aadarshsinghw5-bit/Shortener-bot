@@ -3246,41 +3246,52 @@ async def broadcast(
     )
 
     delete_after = None
-
     mode = "BROADCAST"
-
-    lifespan = "Permanent"
+    lifespan = "PERMANENT ♾"
 
     if arg.endswith("h"):
         try:
-            hours = int(
-                arg[:-1]
-            )
+            hours = int(arg[:-1])
 
-            delete_after = (
-                datetime.now(
-                    timezone.utc
+            if hours > 0:
+                delete_after = (
+                    datetime.now(
+                        timezone.utc
+                    )
+                    + timedelta(
+                        hours=hours
+                    )
                 )
-                + timedelta(
-                    hours=hours
+
+                mode = "PBROADCAST"
+                lifespan = (
+                    f"{hours} "
+                    f"{'HOUR' if hours == 1 else 'HOURS'}"
                 )
-            )
-
-            mode = "PBROADCAST"
-
-            lifespan = arg
 
         except Exception:
             pass
+
+    # =====================================================
+    # BROADCAST INITIALIZATION MESSAGE
+    # =====================================================
+
+    initialization_message = await update.message.reply_text(
+        (
+            "🚀 <b>Broadcast Initialization Started...</b>\n\n"
+            f"⚙️ <b>Type:</b> {mode}\n"
+            f"⏱ <b>Lifespan:</b> {lifespan}\n"
+            "⏳ <b>Please wait till system transfers blocks...</b>"
+        ),
+        parse_mode="HTML",
+    )
 
     rows = db.list_users()
 
     total = len(rows)
 
     success = 0
-
     blocked = 0
-
     failed = 0
 
     sent = []
@@ -3292,11 +3303,11 @@ async def broadcast(
 
         try:
             message = await context.bot.copy_message(
-    chat_id=uid,
-    from_chat_id=replied.chat_id,
-    message_id=replied.message_id,
-    reply_markup=replied.reply_markup,
-)
+                chat_id=uid,
+                from_chat_id=replied.chat_id,
+                message_id=replied.message_id,
+                reply_markup=replied.reply_markup,
+            )
 
             success += 1
 
@@ -3308,23 +3319,25 @@ async def broadcast(
             )
 
         except Exception as e:
+            error_text = str(e).lower()
+
             if (
-                "blocked"
-                in str(e).lower()
-                or "chat not found"
-                in str(e).lower()
+                "blocked" in error_text
+                or "chat not found" in error_text
             ):
                 blocked += 1
 
                 try:
-                    db.delete_user(
-                        uid
-                    )
+                    db.delete_user(uid)
                 except Exception:
                     pass
 
             else:
                 failed += 1
+
+    # =====================================================
+    # AUTO DELETE SCHEDULE
+    # =====================================================
 
     if delete_after:
 
@@ -3335,10 +3348,11 @@ async def broadcast(
                 user_id,
                 message_id,
             ) in sent:
+
                 try:
                     await ctx.bot.delete_message(
-                        user_id,
-                        message_id,
+                        chat_id=user_id,
+                        message_id=message_id,
                     )
 
                 except Exception:
@@ -3358,6 +3372,19 @@ async def broadcast(
             delete_broadcast_job,
             delay,
         )
+
+    # =====================================================
+    # DELETE INITIALIZATION MESSAGE
+    # =====================================================
+
+    try:
+        await initialization_message.delete()
+    except Exception:
+        pass
+
+    # =====================================================
+    # FINAL STATS
+    # =====================================================
 
     stats = (
         "📢 <b>BROADCAST COMPLETED!</b>\n\n"

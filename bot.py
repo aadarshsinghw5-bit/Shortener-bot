@@ -3292,10 +3292,11 @@ async def broadcast(
 
         try:
             message = await context.bot.copy_message(
-                uid,
-                replied.chat_id,
-                replied.message_id,
-            )
+    chat_id=uid,
+    from_chat_id=replied.chat_id,
+    message_id=replied.message_id,
+    reply_markup=replied.reply_markup,
+)
 
             success += 1
 

@@ -1655,9 +1655,8 @@ async def callback(
 
     uid = q.from_user.id
 
-    if uid != OWNER_ID:
-        try:
-            if db.is_banned(uid):
+    if uid:
+           if db.is_banned(uid):
                 await q.answer(
                     "🚫 ʏᴏᴜ ᴀʀᴇ ʙᴀɴɴᴇᴅ.",
                     show_alert=True,

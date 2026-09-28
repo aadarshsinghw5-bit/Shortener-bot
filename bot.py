@@ -1655,18 +1655,22 @@ async def callback(
 
     uid = q.from_user.id
 
-    if uid:
-           if db.is_banned(uid):
-                await q.answer(
-                    "🚫 ʏᴏᴜ ᴀʀᴇ ʙᴀɴɴᴇᴅ.",
-                    show_alert=True,
-                )
-                return
+    # =====================================================
+    # BAN CHECK
+    # =====================================================
 
-        except Exception:
-            log.exception(
-                "Callback ban check failed"
+    try:
+        if db.is_banned(uid):
+            await q.answer(
+                "🚫 ʏᴏᴜ ᴀʀᴇ ʙᴀɴɴᴇᴅ.",
+                show_alert=True,
             )
+            return
+
+    except Exception:
+        log.exception(
+            "Callback ban check failed"
+        )
 
     # =====================================================
     # TIMEZONE CALLBACKS
@@ -1770,6 +1774,39 @@ async def callback(
         return
 
     # =====================================================
+    # PUBLIC CALLBACKS
+    # ABOUT / CLOSE / BACK
+    # =====================================================
+
+    if q.data in (
+        "close",
+        "settings_close",
+    ):
+        await q.answer()
+
+        try:
+            await q.message.delete()
+
+        except Exception:
+            pass
+
+        return
+
+    if q.data == "about":
+        await q.answer()
+
+        return await edit_about(
+            q
+        )
+
+    if q.data == "back":
+        await q.answer()
+
+        return await edit_start(
+            q
+        )
+
+    # =====================================================
     # NORMAL ADMIN CALLBACKS
     # =====================================================
 
@@ -1806,36 +1843,6 @@ async def callback(
         )
 
     await q.answer()
-
-    # =====================================================
-    # CLOSE
-    # =====================================================
-
-    if q.data in (
-        "close",
-        "settings_close",
-    ):
-        try:
-            await q.message.delete()
-
-        except Exception:
-            pass
-
-        return
-
-    # =====================================================
-    # ABOUT
-    # =====================================================
-
-    if q.data == "about":
-        return await edit_about(q)
-
-    # =====================================================
-    # BACK
-    # =====================================================
-
-    if q.data == "back":
-        return await edit_start(q)
 
     # =====================================================
     # F-SUB CHECK

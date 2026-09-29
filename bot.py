@@ -3170,10 +3170,12 @@ async def users(
     try:
         rows = db.list_users()
 
-        lines = [
-            f"<b>👥 ᴜꜱᴇʀꜱ: {len(rows)}</b>",
-            "",
-        ]
+        header = (
+            f"<b>👥 ᴜꜱᴇʀꜱ: {len(rows)}</b>\n\n"
+        )
+
+        messages = []
+        current = header
 
         for r in rows:
             try:
@@ -3193,7 +3195,6 @@ async def users(
                     else "—"
                 )
 
-                # Escape user-controlled text
                 safe_name = escape(
                     str(name)
                 )
@@ -3202,37 +3203,35 @@ async def users(
                     str(username)
                 )
 
-                lines.append(
-                    (
-                        f'• <a href="tg://user?id={uid}">'
-                        f"{safe_name}</a> | "
-                        f"{safe_username} | "
-                        f"<code>{uid}</code>"
-                    )
+                line = (
+                    f'• <a href="tg://user?id={uid}">'
+                    f"{safe_name}</a> | "
+                    f"{safe_username} | "
+                    f"<code>{uid}</code>\n"
                 )
+
+                # Keep every HTML line intact.
+                if len(current) + len(line) > 3500:
+                    messages.append(current)
+                    current = line
+                else:
+                    current += line
 
             except Exception:
                 continue
 
-        text = "\n".join(
-            lines
-        )
+        if current.strip():
+            messages.append(current)
 
         try:
             await wait_msg.delete()
         except Exception:
             pass
 
-        # Telegram message limit safe split
-        for pos in range(
-            0,
-            len(text),
-            3500,
-        ):
+        # Send each complete HTML block separately
+        for message_text in messages:
             await update.message.reply_text(
-                text[
-                    pos:pos + 3500
-                ],
+                message_text,
                 parse_mode="HTML",
                 disable_web_page_preview=True,
             )

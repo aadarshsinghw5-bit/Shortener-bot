@@ -3163,10 +3163,6 @@ async def users(
             "❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ."
         )
 
-    # -----------------------------------------------------
-    # FETCHING USERS MESSAGE
-    # -----------------------------------------------------
-
     wait_msg = await update.message.reply_text(
         "ꜰᴇᴛᴄʜɪɴɢ ᴜꜱᴇʀꜱ...."
     )
@@ -3182,28 +3178,35 @@ async def users(
         for r in rows:
             try:
                 uid = int(
-                    r["user_id"]
+                    r.get("user_id")
                 )
 
                 name = (
-                    r.get(
-                        "first_name"
-                    )
+                    r.get("first_name")
                     or "User"
                 )
 
                 username = (
                     "@"
-                    + r["username"]
+                    + str(r["username"])
                     if r.get("username")
                     else "—"
+                )
+
+                # Escape user-controlled text
+                safe_name = escape(
+                    str(name)
+                )
+
+                safe_username = escape(
+                    str(username)
                 )
 
                 lines.append(
                     (
                         f'• <a href="tg://user?id={uid}">'
-                        f"{escape(str(name))}</a> | "
-                        f"{escape(str(username))} | "
+                        f"{safe_name}</a> | "
+                        f"{safe_username} | "
                         f"<code>{uid}</code>"
                     )
                 )
@@ -3215,29 +3218,20 @@ async def users(
             lines
         )
 
-        # Delete fetching message
         try:
             await wait_msg.delete()
         except Exception:
             pass
 
-        # -------------------------------------------------
-        # SEND USERS LIST
-        # -------------------------------------------------
-
-        if not text.strip():
-            return await update.message.reply_text(
-                "👥 ᴜꜱᴇʀꜱ: 0"
-            )
-
+        # Telegram message limit safe split
         for pos in range(
             0,
             len(text),
-            3900,
+            3500,
         ):
             await update.message.reply_text(
                 text[
-                    pos:pos + 3900
+                    pos:pos + 3500
                 ],
                 parse_mode="HTML",
                 disable_web_page_preview=True,
@@ -3254,7 +3248,8 @@ async def users(
             pass
 
         await update.message.reply_text(
-            "❌ ᴜꜱᴇʀꜱ ʟɪꜱᴛ ꜰᴇᴛᴄʜ ᴋᴀʀɴᴇ ᴍᴇ ᴇʀʀᴏʀ ᴀᴀ ɢᴀʏᴀ."
+            "❌ ᴜꜱᴇʀꜱ ʟɪꜱᴛ ꜰᴇᴛᴄʜ ᴋᴀʀɴᴇ ᴍᴇ "
+            "ᴇʀʀᴏʀ ᴀᴀ ɢᴀʏᴀ."
         )
 
 

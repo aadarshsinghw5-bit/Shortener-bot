@@ -3163,56 +3163,98 @@ async def users(
             "❌ ᴜɴᴀᴜᴛʜᴏʀɪᴢᴇᴅ."
         )
 
-    rows = db.list_users()
+    # -----------------------------------------------------
+    # FETCHING USERS MESSAGE
+    # -----------------------------------------------------
 
-    lines = [
-        f"<b>👥 ᴜꜱᴇʀꜱ: {len(rows)}</b>",
-        "",
-    ]
-
-    for r in rows:
-        uid = int(
-            r["user_id"]
-        )
-
-        name = (
-            r.get(
-                "first_name"
-            )
-            or "User"
-        )
-
-        username = (
-            "@"
-            + r["username"]
-            if r.get("username")
-            else "—"
-        )
-
-        lines.append(
-            (
-                f'• <a href="tg://user?id={uid}">'
-                f"{escape(name)}</a> | "
-                f"{escape(username)} | "
-                f"<code>{uid}</code>"
-            )
-        )
-
-    text = "\n".join(
-        lines
+    wait_msg = await update.message.reply_text(
+        "ꜰᴇᴛᴄʜɪɴɢ ᴜꜱᴇʀꜱ...."
     )
 
-    for pos in range(
-        0,
-        len(text),
-        3900,
-    ):
+    try:
+        rows = db.list_users()
+
+        lines = [
+            f"<b>👥 ᴜꜱᴇʀꜱ: {len(rows)}</b>",
+            "",
+        ]
+
+        for r in rows:
+            try:
+                uid = int(
+                    r["user_id"]
+                )
+
+                name = (
+                    r.get(
+                        "first_name"
+                    )
+                    or "User"
+                )
+
+                username = (
+                    "@"
+                    + r["username"]
+                    if r.get("username")
+                    else "—"
+                )
+
+                lines.append(
+                    (
+                        f'• <a href="tg://user?id={uid}">'
+                        f"{escape(str(name))}</a> | "
+                        f"{escape(str(username))} | "
+                        f"<code>{uid}</code>"
+                    )
+                )
+
+            except Exception:
+                continue
+
+        text = "\n".join(
+            lines
+        )
+
+        # Delete fetching message
+        try:
+            await wait_msg.delete()
+        except Exception:
+            pass
+
+        # -------------------------------------------------
+        # SEND USERS LIST
+        # -------------------------------------------------
+
+        if not text.strip():
+            return await update.message.reply_text(
+                "👥 ᴜꜱᴇʀꜱ: 0"
+            )
+
+        for pos in range(
+            0,
+            len(text),
+            3900,
+        ):
+            await update.message.reply_text(
+                text[
+                    pos:pos + 3900
+                ],
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+
+    except Exception:
+        log.exception(
+            "Users command failed"
+        )
+
+        try:
+            await wait_msg.delete()
+        except Exception:
+            pass
+
         await update.message.reply_text(
-            text[
-                pos:pos + 3900
-            ],
-            parse_mode="HTML",
-            disable_web_page_preview=True,
+            "❌ ᴜꜱᴇʀꜱ ʟɪꜱᴛ ꜰᴇᴛᴄʜ ᴋᴀʀɴᴇ ᴍᴇ ᴇʀʀᴏʀ ᴀᴀ ɢᴀʏᴀ."
         )
 
 
@@ -3584,7 +3626,7 @@ def main():
     app.add_handler(
         CommandHandler(
             "users",
-            with_wait("ꜰᴇᴛᴄʜɪɴɢ ᴜꜱᴇʀꜱ....")(users),
+             users,
         )
     )
 

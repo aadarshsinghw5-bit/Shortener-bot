@@ -1490,35 +1490,57 @@ async def start(
         u.first_name or "",
     )
 
-    if db.is_banned(
-        u.id
-    ):
+    if db.is_banned(u.id):
         return await update.message.reply_text(
             "🚫 ʏᴏᴜ ᴀʀᴇ ʙᴀɴɴᴇᴅ."
         )
 
-    if context.args:
-        arg = context.args[0]
+    # Save the original start payload
+    start_arg = (
+        context.args[0]
+        if context.args
+        else ""
+    )
 
-        if arg.startswith(
-            "verify_"
-        ):
+    # -------------------------------------------------
+    # F-SUB CHECK
+    # -------------------------------------------------
+
+    missing = await is_fsub_member(
+        context.bot,
+        u.id,
+    )
+
+    if missing:
+        if start_arg:
+            _pending_start[u.id] = start_arg
+
+        return await send_fsub_message(
+            update.message,
+            missing,
+        )
+
+    # -------------------------------------------------
+    # ORIGINAL COMMAND
+    # -------------------------------------------------
+
+    if start_arg:
+
+        if start_arg.startswith("verify_"):
             return await verify(
                 update,
                 context,
-                arg[7:],
+                start_arg[7:],
             )
 
-        if arg.startswith(
-            "link_"
-        ):
+        if start_arg.startswith("link_"):
             return await open_main(
                 update,
                 context,
-                arg[5:],
+                start_arg[5:],
             )
 
-    await render_start(
+    return await render_start(
         update.message
     )
 
@@ -1877,26 +1899,53 @@ async def callback(
     # =====================================================
 
     if q.data == "check_fsub":
-        missing = await is_fsub_member(
-            context.bot,
-            uid,
+
+    missing = await is_fsub_member(
+        context.bot,
+        uid,
+    )
+
+    if missing:
+        return await q.answer(
+            "❌ ᴊᴏɪɴ ᴀʟʟ ᴄʜᴀɴɴᴇʟꜱ ꜰɪʀꜱᴛ.",
+            show_alert=True,
         )
 
-        if missing:
-            return await q.answer(
-                "❌ ᴊᴏɪɴ ᴀʟʟ ᴄʜᴀɴɴᴇʟꜱ ꜰɪʀꜱᴛ.",
-                show_alert=True,
-            )
+    await q.answer(
+        "✅ ᴊᴏɪɴ ᴠᴇʀɪꜰɪᴇᴅ.",
+    )
 
-        try:
-            await q.message.delete()
+    original_arg = _pending_start.pop(
+        uid,
+        "",
+    )
 
-        except Exception:
-            pass
+    try:
+        await q.message.delete()
+    except Exception:
+        pass
 
-        return await render_start(
-            q.message
+    # ---------------------------------------------
+    # Retry the SAME command
+    # ---------------------------------------------
+
+    if original_arg.startswith("verify_"):
+        return await verify(
+            update,
+            context,
+            original_arg[7:],
         )
+
+    if original_arg.startswith("link_"):
+        return await open_main(
+            update,
+            context,
+            original_arg[5:],
+        )
+
+    return await render_start(
+        q.message
+    )
 
     # =====================================================
     # SET START IMAGE

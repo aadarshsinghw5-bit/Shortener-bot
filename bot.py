@@ -1495,52 +1495,28 @@ async def start(
             "🚫 ʏᴏᴜ ᴀʀᴇ ʙᴀɴɴᴇᴅ."
         )
 
-    # Save the original start payload
-    start_arg = (
-        context.args[0]
-        if context.args
-        else ""
-    )
+    if context.args:
+        arg = context.args[0]
 
-    # -------------------------------------------------
-    # F-SUB CHECK
-    # -------------------------------------------------
-
-    missing = await is_fsub_member(
-        context.bot,
-        u.id,
-    )
-
-    if missing:
-        if start_arg:
-            _pending_start[u.id] = start_arg
-
-        return await send_fsub_message(
-            update.message,
-            missing,
-        )
-
-    # -------------------------------------------------
-    # ORIGINAL COMMAND
-    # -------------------------------------------------
-
-    if start_arg:
-
-        if start_arg.startswith("verify_"):
+        if arg.startswith(
+            "verify_"
+        ):
             return await verify(
                 update,
                 context,
-                start_arg[7:],
+                arg[7:],
             )
 
-        if start_arg.startswith("link_"):
+        if arg.startswith(
+            "link_"
+        ):
             return await open_main(
                 update,
                 context,
-                start_arg[5:],
+                arg[5:],
             )
 
-    return await render_start(
+    await render_start(
         update.message
     )
 

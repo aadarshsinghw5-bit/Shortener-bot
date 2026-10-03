@@ -3567,6 +3567,8 @@ async def channel_post_indexer(
 # MAIN
 # =========================================================
 
+_pending_fsub = {}
+
 def main():
 
     threading.Thread(

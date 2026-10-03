@@ -1894,34 +1894,29 @@ async def callback(
             show_alert=False,
         )
 
-        original_arg = _pending_start.pop(
-            uid,
-            "",
+    # Get the original link token
+    token = _pending_fsub.pop(
+        uid,
+        None,
+    )
+
+    try:
+        await q.message.delete()
+    except Exception:
+        pass
+
+    # Retry the same link command
+    if token:
+        return await open_main(
+            update,
+            context,
+            token,
         )
 
-        try:
-            await q.message.delete()
-        except Exception:
-            pass
-
-        # Retry original command
-        if original_arg.startswith("verify_"):
-            return await verify(
-                update,
-                context,
-                original_arg[7:],
-            )
-
-        if original_arg.startswith("link_"):
-            return await open_main(
-                update,
-                context,
-                original_arg[5:],
-            )
-
-        return await render_start(
-            q.message
-        )
+    # No pending command
+    return await render_start(
+        q.message
+    )
 
     # =====================================================
     # SET START IMAGE

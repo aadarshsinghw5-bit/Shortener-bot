@@ -1913,6 +1913,7 @@ async def callback(
 
         await q.answer(
             "✅ ᴊᴏɪɴ ᴠᴇʀɪꜰɪᴇᴅ.",
+            show_alert=False,
         )
 
         original_arg = _pending_start.pop(
@@ -1925,27 +1926,24 @@ async def callback(
         except Exception:
             pass
 
-    # ---------------------------------------------
-    # Retry the SAME command
-    # ---------------------------------------------
+        # Retry original command
+        if original_arg.startswith("verify_"):
+            return await verify(
+                update,
+                context,
+                original_arg[7:],
+            )
 
-    if original_arg.startswith("verify_"):
-        return await verify(
-            update,
-            context,
-            original_arg[7:],
+        if original_arg.startswith("link_"):
+            return await open_main(
+                update,
+                context,
+                original_arg[5:],
+            )
+
+        return await render_start(
+            q.message
         )
-
-    if original_arg.startswith("link_"):
-        return await open_main(
-            update,
-            context,
-            original_arg[5:],
-        )
-
-    return await render_start(
-        q.message
-    )
 
     # =====================================================
     # SET START IMAGE

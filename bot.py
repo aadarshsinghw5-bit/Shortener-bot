@@ -1807,6 +1807,34 @@ async def callback(
         )
 
     # =====================================================
+    # USER CALLBACKS
+    # =====================================================
+    
+    if q.data == "check_fsub":
+        missing = await is_fsub_member(
+            context.bot,
+            uid,
+        )
+    
+        if missing:
+            return await q.answer(
+                "❌ ᴊᴏɪɴ ᴀʟʟ ᴄʜᴀɴɴᴇʟꜱ ꜰɪʀꜱᴛ.",
+                show_alert=True,
+            )
+
+        await q.answer(
+            "✅ ᴊᴏɪɴ ᴠᴇʀɪꜰɪᴇᴅ.",
+            show_alert=False,
+        )
+
+        try:
+            await q.message.delete()
+        except Exception:
+            pass
+
+        return await render_start(q.message)
+    
+    # =====================================================
     # NORMAL ADMIN CALLBACKS
     # =====================================================
 

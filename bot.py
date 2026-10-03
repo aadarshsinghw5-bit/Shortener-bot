@@ -1423,6 +1423,8 @@ async def open_main(
     )
 
     if missing:
+        _pending_fsub[uid] = token
+        
         return await update.message.reply_text(
             "⚡ <b>ᴊᴏɪɴ ʀᴇǫᴜɪʀᴇᴅ</b>\n\n"
             "ᴊᴏɪɴ ᴀʟʟ ʀᴇǫᴜɪʀᴇᴅ ᴄʜᴀɴɴᴇʟꜱ "

@@ -1900,30 +1900,30 @@ async def callback(
 
     if q.data == "check_fsub":
 
-    missing = await is_fsub_member(
-        context.bot,
-        uid,
-    )
-
-    if missing:
-        return await q.answer(
-            "❌ ᴊᴏɪɴ ᴀʟʟ ᴄʜᴀɴɴᴇʟꜱ ꜰɪʀꜱᴛ.",
-            show_alert=True,
+        missing = await is_fsub_member(
+            context.bot,
+            uid,
         )
 
-    await q.answer(
-        "✅ ᴊᴏɪɴ ᴠᴇʀɪꜰɪᴇᴅ.",
-    )
+        if missing:
+            return await q.answer(
+                "❌ ᴊᴏɪɴ ᴀʟʟ ᴄʜᴀɴɴᴇʟꜱ ꜰɪʀꜱᴛ.",
+                show_alert=True,
+            )
 
-    original_arg = _pending_start.pop(
-        uid,
-        "",
-    )
+        await q.answer(
+            "✅ ᴊᴏɪɴ ᴠᴇʀɪꜰɪᴇᴅ.",
+        )
 
-    try:
-        await q.message.delete()
-    except Exception:
-        pass
+        original_arg = _pending_start.pop(
+            uid,
+            "",
+        )
+
+        try:
+            await q.message.delete()
+        except Exception:
+            pass
 
     # ---------------------------------------------
     # Retry the SAME command

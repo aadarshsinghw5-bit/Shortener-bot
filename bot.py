@@ -1873,52 +1873,6 @@ async def callback(
     await q.answer()
 
     # =====================================================
-    # F-SUB CHECK
-    # =====================================================
-
-    if q.data == "check_fsub":
-
-        missing = await is_fsub_member(
-            context.bot,
-            uid,
-        )
-
-        if missing:
-            return await q.answer(
-                "❌ ᴊᴏɪɴ ᴀʟʟ ᴄʜᴀɴɴᴇʟꜱ ꜰɪʀꜱᴛ.",
-                show_alert=True,
-            )
-
-        await q.answer(
-            "✅ ᴊᴏɪɴ ᴠᴇʀɪꜰɪᴇᴅ.",
-            show_alert=False,
-        )
-
-    # Get the original link token
-    token = _pending_fsub.pop(
-        uid,
-        None,
-    )
-
-    try:
-        await q.message.delete()
-    except Exception:
-        pass
-
-    # Retry the same link command
-    if token:
-        return await open_main(
-            update,
-            context,
-            token,
-        )
-
-    # No pending command
-    return await render_start(
-        q.message
-    )
-
-    # =====================================================
     # SET START IMAGE
     # =====================================================
 

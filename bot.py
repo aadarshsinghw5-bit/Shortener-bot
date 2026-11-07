@@ -2170,24 +2170,31 @@ async def settings_input(
                 "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ᴀᴅᴅ ᴏʀ ʀᴇᴍᴏᴠᴇ ᴀᴅᴍɪɴꜱ."
             )
 
+        remove_mode = -uid in _pending_admin
+        pending_key = -uid if remove_mode else uid
         raw_id = (update.message.text or "").strip()
         if not raw_id.isdigit() or int(raw_id) <= 0:
+            _pending_admin.discard(pending_key)
             return await update.message.reply_text(
-                "❌ ᴇɴᴛᴇʀ ᴀ ᴠᴀʟɪᴅ ɴᴜᴍᴇʀɪᴄ ᴜꜱᴇʀ ɪᴅ."
+                "❌ ᴇɴᴛᴇʀ ᴀ ᴠᴀʟɪᴅ ɴᴜᴍᴇʀɪᴄ ᴜꜱᴇʀ ɪᴅ.\n"
+                "ᴘʟᴇᴀꜱᴇ ᴘʀᴇꜱꜱ ᴛʜᴇ ꜱᴇᴛᴛɪɴɢꜱ ʙᴜᴛᴛᴏɴ ᴀɢᴀɪɴ."
             )
 
         target_uid = int(raw_id)
-        remove_mode = -uid in _pending_admin
 
         if target_uid == OWNER_ID:
+            _pending_admin.discard(pending_key)
             return await update.message.reply_text(
-                "❌ ᴏᴡɴᴇʀ ᴄᴀɴɴᴏᴛ ʙᴇ ᴀᴅᴅᴇᴅ ᴏʀ ʀᴇᴍᴏᴠᴇᴅ."
+                "❌ ᴏᴡɴᴇʀ ᴄᴀɴɴᴏᴛ ʙᴇ ᴀᴅᴅᴇᴅ ᴏʀ ʀᴇᴍᴏᴠᴇᴅ.\n"
+                "ᴘʟᴇᴀꜱᴇ ᴘʀᴇꜱꜱ ᴛʜᴇ ꜱᴇᴛᴛɪɴɢꜱ ʙᴜᴛᴛᴏɴ ᴀɢᴀɪɴ."
             )
 
         if remove_mode:
             if not db.is_admin(target_uid):
+                _pending_admin.discard(-uid)
                 return await update.message.reply_text(
-                    "⚠️ ᴛʜɪꜱ ᴜꜱᴇʀ ɪᴅ ɪꜱ ɴᴏᴛ ᴀɴ ᴀᴅᴍɪɴ."
+                    "⚠️ ᴛʜɪꜱ ᴜꜱᴇʀ ɪᴅ ɪꜱ ɴᴏᴛ ᴀɴ ᴀᴅᴍɪɴ.\n"
+                    "ᴘʟᴇᴀꜱᴇ ᴘʀᴇꜱꜱ ᴛʜᴇ ꜱᴇᴛᴛɪɴɢꜱ ʙᴜᴛᴛᴏɴ ᴀɢᴀɪɴ."
                 )
 
             db.remove_admin(target_uid)
@@ -2198,8 +2205,10 @@ async def settings_input(
             )
 
         if db.is_admin(target_uid):
+            _pending_admin.discard(uid)
             return await update.message.reply_text(
-                "⚠️ ᴛʜɪꜱ ᴜꜱᴇʀ ɪᴅ ɪꜱ ᴀʟʀᴇᴀᴅʏ ᴀɴ ᴀᴅᴍɪɴ."
+                "⚠️ ᴛʜɪꜱ ᴜꜱᴇʀ ɪᴅ ɪꜱ ᴀʟʀᴇᴀᴅʏ ᴀɴ ᴀᴅᴍɪɴ.\n"
+                "ᴘʟᴇᴀꜱᴇ ᴘʀᴇꜱꜱ ᴛʜᴇ ꜱᴇᴛᴛɪɴɢꜱ ʙᴜᴛᴛᴏɴ ᴀɢᴀɪɴ."
             )
 
         db.add_admin(target_uid)
@@ -2222,8 +2231,10 @@ async def settings_input(
 
         raw_id = (update.message.text or "").strip()
         if not re.fullmatch(r"-100\d+", raw_id):
+            _pending_fsub.discard(uid)
             return await update.message.reply_text(
-                "❌ ᴘʟᴇᴀꜱᴇ ꜱᴇɴᴅ ᴀ ᴠᴀʟɪᴅ ᴄʜᴀɴɴᴇʟ ɪᴅ (-100...)."
+                "❌ ᴘʟᴇᴀꜱᴇ ꜱᴇɴᴅ ᴀ ᴠᴀʟɪᴅ ᴄʜᴀɴɴᴇʟ ɪᴅ (-100...).\n"
+                "ᴘʟᴇᴀꜱᴇ ᴘʀᴇꜱꜱ ᴀᴅᴅ ꜰꜱᴜʙ ᴀɢᴀɪɴ."
             )
 
         cid = int(raw_id)
@@ -2257,6 +2268,7 @@ async def settings_input(
             )
         except Exception as e:
             log.exception("FSub add failed for channel %s", cid)
+            _pending_fsub.discard(uid)
             return await update.message.reply_text(
                 (
                     "❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ᴀᴅᴅ ᴛʜɪꜱ ᴄʜᴀɴɴᴇʟ.\n"
@@ -2281,8 +2293,10 @@ async def settings_input(
 
         raw_id = (update.message.text or "").strip()
         if not re.fullmatch(r"-100\d+", raw_id):
+            _pending_fsub.discard(remkey)
             return await update.message.reply_text(
-                "❌ ᴘʟᴇᴀꜱᴇ ꜱᴇɴᴅ ᴀ ᴠᴀʟɪᴅ ᴄʜᴀɴɴᴇʟ ɪᴅ (-100...)."
+                "❌ ᴘʟᴇᴀꜱᴇ ꜱᴇɴᴅ ᴀ ᴠᴀʟɪᴅ ᴄʜᴀɴɴᴇʟ ɪᴅ (-100...).\n"
+                "ᴘʟᴇᴀꜱᴇ ᴘʀᴇꜱꜱ ʀᴇᴍᴏᴠᴇ ꜰꜱᴜʙ ᴀɢᴀɪɴ."
             )
 
         if not any(str(row.get("channel_id")) == raw_id for row in db.list_fsub()):
@@ -2299,6 +2313,7 @@ async def settings_input(
                 parse_mode="HTML",
             )
         except Exception:
+            _pending_fsub.discard(remkey)
             log.exception("FSub removal failed for channel %s", raw_id)
             return await update.message.reply_text(
                 "❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ʀᴇᴍᴏᴠᴇ ꜰꜱᴜʙ."

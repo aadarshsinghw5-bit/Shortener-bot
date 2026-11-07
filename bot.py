@@ -1967,43 +1967,68 @@ async def callback(
         )
 
     # =====================================================
-    # ADD ADMIN
+    # ADD / REMOVE ADMIN
     # =====================================================
 
-    if q.data == "add_admin":
+    if (
+        uid in _pending_admin
+        or -uid in _pending_admin
+    ):
         if uid != OWNER_ID:
-            return await q.answer(
+            _pending_admin.discard(uid)
+            _pending_admin.discard(-uid)
+
+            return await update.message.reply_text(
                 "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ "
-                "ᴀᴅᴅ ᴀᴅᴍɪɴꜱ.",
-                show_alert=True,
+                "ᴀᴅᴅ ᴏʀ ʀᴇᴍᴏᴠᴇ ᴀᴅᴍɪɴꜱ."
             )
 
-        _pending_admin.add(uid)
+        raw_id = (update.message.text or "").strip()
 
-        return await q.message.reply_text(
-            "➕ ꜱᴇɴᴅ ᴛʜᴇ ᴜꜱᴇʀ ɪᴅ "
-            "ᴛᴏ ᴀᴅᴅ ᴀꜱ ᴀᴅᴍɪɴ."
-        )
-
-    # =====================================================
-    # REMOVE ADMIN
-    # =====================================================
-
-    if q.data == "remove_admin":
-        if uid != OWNER_ID:
-            return await q.answer(
-                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ "
-                "ʀᴇᴍᴏᴠᴇ ᴀᴅᴍɪɴꜱ.",
-                show_alert=True,
+        if not raw_id.isdigit() or int(raw_id) <= 0:
+            return await update.message.reply_text(
+                "❌ ᴇɴᴛᴇʀ ᴏɴʟʏ ᴀ ᴠᴀʟɪᴅ "
+                "ɴᴜᴍᴇʀɪᴄ ᴜꜱᴇʀ ɪᴅ."
             )
 
-        _pending_admin.add(
-            -uid
-        )
+        target_uid = int(raw_id)
+        remove_mode = -uid in _pending_admin
 
-        return await q.message.reply_text(
-            "➖ ꜱᴇɴᴅ ᴛʜᴇ ᴜꜱᴇʀ ɪᴅ "
-            "ᴛᴏ ʀᴇᴍᴏᴠᴇ ᴀɴ ᴀᴅᴍɪɴ."
+        if target_uid == OWNER_ID:
+            return await update.message.reply_text(
+                "❌ ᴏᴡɴᴇʀ ᴄᴀɴɴᴏᴛ ʙᴇ "
+                "ᴀᴅᴅᴇᴅ ᴏʀ ʀᴇᴍᴏᴠᴇᴅ."
+            )
+
+        if remove_mode:
+            if not db.is_admin(target_uid):
+                return await update.message.reply_text(
+                    "⚠️ ᴛʜɪꜱ ᴜꜱᴇʀ ɪᴅ "
+                    "ɪꜱ ɴᴏᴛ ᴀɴ ᴀᴅᴍɪɴ."
+                )
+
+            db.remove_admin(target_uid)
+            _pending_admin.discard(-uid)
+
+            return await update.message.reply_text(
+                f"✅ ᴀᴅᴍɪɴ ʀᴇᴍᴏᴠᴇᴅ.\n\n"
+                f"🆔 <code>{target_uid}</code>",
+                parse_mode="HTML",
+            )
+
+        if db.is_admin(target_uid):
+            return await update.message.reply_text(
+                "⚠️ ᴛʜɪꜱ ᴜꜱᴇʀ ɪᴅ "
+                "ɪꜱ ᴀʟʀᴇᴀᴅʏ ᴀɴ ᴀᴅᴍɪɴ."
+            )
+
+        db.add_admin(target_uid)
+        _pending_admin.discard(uid)
+
+        return await update.message.reply_text(
+            f"✅ ᴀᴅᴍɪɴ ᴀᴅᴅᴇᴅ.\n\n"
+            f"🆔 <code>{target_uid}</code>",
+            parse_mode="HTML",
         )
 
     # =====================================================
@@ -2083,43 +2108,129 @@ async def callback(
     # ADD F-SUB
     # =====================================================
 
-    if q.data == "add_fsub":
+    if uid in _pending_fsub:
         if uid != OWNER_ID:
-            return await q.answer(
-                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ "
-                "ᴀᴅᴅ ꜰꜱᴜʙ.",
-                show_alert=True,
+            _pending_fsub.discard(uid)
+
+            return await update.message.reply_text(
+                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ᴀᴅᴅ ꜰꜱᴜʙ."
             )
 
-        _pending_fsub.add(uid)
+        raw_id = (update.message.text or "").strip()
 
-        return await q.message.reply_text(
-            "📢 ꜱᴇɴᴅ ᴛʜᴇ ᴄʜᴀɴɴᴇʟ ɪᴅ ᴏɴʟʏ.\n"
-            "ᴛʜᴇ ʙᴏᴛ ᴡɪʟʟ ɢᴇᴛ "
-            "ᴛʜᴇ ᴄʜᴀɴɴᴇʟ ɴᴀᴍᴇ ᴀɴᴅ "
-            "ɪɴᴠɪᴛᴇ ʟɪɴᴋ ᴀᴜᴛᴏᴍᴀᴛɪᴄᴀʟʟʏ."
-        )
+        if not re.fullmatch(r"-100\d+", raw_id):
+            return await update.message.reply_text(
+                "❌ ᴘʟᴇᴀꜱᴇ ꜱᴇɴᴅ ᴀ "
+                "ᴠᴀʟɪᴅ ᴄʜᴀɴɴᴇʟ ɪᴅ (-100...)."
+            )
+
+        cid = int(raw_id)
+
+        if any(
+            str(row.get("channel_id")) == raw_id
+            for row in db.list_fsub()
+        ):
+            _pending_fsub.discard(uid)
+
+            return await update.message.reply_text(
+                "⚠️ ᴛʜɪꜱ ꜰꜱᴜʙ ᴄʜᴀɴɴᴇʟ "
+                "ɪꜱ ᴀʟʀᴇᴀᴅʏ ᴀᴅᴅᴇᴅ."
+            )
+
+        try:
+            chat = await context.bot.get_chat(cid)
+
+            invite = await context.bot.create_chat_invite_link(
+                cid,
+                name="File Store FSub",
+            )
+
+            db.add_fsub(
+                cid,
+                invite.invite_link,
+                chat.title or chat.username or str(cid),
+            )
+
+            _pending_fsub.discard(uid)
+
+            return await update.message.reply_text(
+                (
+                    f"✅ <b>ꜰꜱᴜʙ ᴀᴅᴅᴇᴅ</b>\n\n"
+                    f'📢 <a href="{escape(invite.invite_link)}">'
+                    f"{escape(chat.title or 'Channel')}</a>\n"
+                    f"🆔 <code>{cid}</code>\n"
+                    f'🔗 <a href="{escape(invite.invite_link)}">'
+                    f"ɪɴᴠɪᴛᴇ ʟɪɴᴋ</a>"
+                ),
+                parse_mode="HTML",
+            )
+
+        except Exception as e:
+            log.exception("FSub add failed for channel %s", cid)
+
+            return await update.message.reply_text(
+                (
+                    "❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ᴀᴅᴅ ᴛʜɪꜱ ᴄʜᴀɴɴᴇʟ.\n"
+                    "ᴄʜᴇᴄᴋ ᴛʜᴇ ᴄʜᴀɴɴᴇʟ ɪᴅ, ᴀɴᴅ "
+                    "ᴍᴀᴋᴇ ꜱᴜʀᴇ ᴛʜᴇ ʙᴏᴛ ɪꜱ ᴀᴅᴍɪɴ "
+                    "ᴡɪᴛʜ ɪɴᴠɪᴛᴇ ᴘᴇʀᴍɪꜱꜱɪᴏɴ.\n\n"
+                    f"<code>{escape(str(e))}</code>"
+                ),
+                parse_mode="HTML",
+            )
 
     # =====================================================
     # REMOVE F-SUB
     # =====================================================
 
-    if q.data == "remove_fsub":
+    remkey = uid * 1000000000 + 1
+
+    if remkey in _pending_fsub:
         if uid != OWNER_ID:
-            return await q.answer(
-                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ "
-                "ʀᴇᴍᴏᴠᴇ ꜰꜱᴜʙ.",
-                show_alert=True,
+            _pending_fsub.discard(remkey)
+
+            return await update.message.reply_text(
+                "❌ ᴏɴʟʏ ᴏᴡɴᴇʀ ᴄᴀɴ ʀᴇᴍᴏᴠᴇ ꜰꜱᴜʙ."
             )
 
-        _pending_fsub.add(
-            uid * 1000000000 + 1
-        )
+        raw_id = (update.message.text or "").strip()
 
-        return await q.message.reply_text(
-            "➖ ꜱᴇɴᴅ ᴛʜᴇ ꜰꜱᴜʙ "
-            "ᴄʜᴀɴɴᴇʟ ɪᴅ ᴛᴏ ʀᴇᴍᴏᴠᴇ."
-        )
+        if not re.fullmatch(r"-100\d+", raw_id):
+            return await update.message.reply_text(
+                "❌ ᴘʟᴇᴀꜱᴇ ꜱᴇɴᴅ ᴀ "
+                "ᴠᴀʟɪᴅ ᴄʜᴀɴɴᴇʟ ɪᴅ (-100...)."
+            )
+
+        if not any(
+            str(row.get("channel_id")) == raw_id
+            for row in db.list_fsub()
+        ):
+            _pending_fsub.discard(remkey)
+
+            return await update.message.reply_text(
+                "⚠️ ᴛʜɪꜱ ᴄʜᴀɴɴᴇʟ "
+                "ɪꜱ ɴᴏᴛ ɪɴ ᴛʜᴇ ꜰꜱᴜʙ ʟɪꜱᴛ."
+            )
+
+        try:
+            db.del_fsub(raw_id)
+            _pending_fsub.discard(remkey)
+
+            return await update.message.reply_text(
+                f"✅ ꜰꜱᴜʙ ᴄʜᴀɴɴᴇʟ ʀᴇᴍᴏᴠᴇᴅ.\n\n"
+                f"🆔 <code>{raw_id}</code>",
+                parse_mode="HTML",
+            )
+
+        except Exception:
+            log.exception(
+                "FSub removal failed for channel %s",
+                raw_id,
+            )
+
+            return await update.message.reply_text(
+                "❌ ᴄᴏᴜʟᴅ ɴᴏᴛ ʀᴇᴍᴏᴠᴇ ꜰꜱᴜʙ."
+            )
 
     # =====================================================
     # SETTINGS BACK

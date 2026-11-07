@@ -3484,6 +3484,9 @@ def main():
     app = (
         Application.builder()
         .token(BOT_TOKEN)
+        # Process incoming updates concurrently so a long broadcast
+        # does not block /start, genlink, callbacks, or file downloads.
+        .concurrent_updates(16)
         .build()
     )
 

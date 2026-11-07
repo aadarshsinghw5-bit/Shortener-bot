@@ -107,6 +107,7 @@ _pending_autodelete = set()
 _pending_admin = set()
 
 _pending_fsub = set()
+_pending_fsub_links = {}
 
 # =========================================================
 # COMMAND WAIT MESSAGE
@@ -1413,7 +1414,7 @@ async def open_main(
     )
 
     if not row:
-        return await update.message.reply_text(
+        return await update.effective_message.reply_text(
             "❌ ᴛʜɪꜱ ʟɪɴᴋ ɪs ɴᴏᴛ ᴠᴀʟɪᴅ."
         )
 
@@ -1423,9 +1424,9 @@ async def open_main(
     )
 
     if missing:
-        _pending_fsub[uid] = token
+        _pending_fsub_links[uid] = token
         
-        return await update.message.reply_text(
+        return await update.effective_message.reply_text(
             "⚡ <b>ᴊᴏɪɴ ʀᴇǫᴜɪʀᴇᴅ</b>\n\n"
             "ᴊᴏɪɴ ᴀʟʟ ʀᴇǫᴜɪʀᴇᴅ ᴄʜᴀɴɴᴇʟꜱ "
             "ᴛʜᴇɴ ᴛᴀᴘ ᴄʜᴇᴄᴋ ᴊᴏɪɴ.",
@@ -1465,13 +1466,13 @@ async def open_main(
     )
 
     if not short_url:
-        return await update.message.reply_text(
+        return await update.effective_message.reply_text(
             "⚠️ ꜱʜᴏʀᴛᴇɴᴇʀ ɪꜱ ɴᴏᴛ "
             "ᴄᴏɴꜰɪɢᴜʀᴇᴅ ᴄᴏʀʀᴇᴄᴛʟʏ."
         )
 
     await send_download_page(
-        update.message,
+        update.effective_message,
         short_url,
     )
 
@@ -1826,6 +1827,20 @@ async def callback(
             "✅ ᴊᴏɪɴ ᴠᴇʀɪꜰɪᴇᴅ.",
             show_alert=False,
         )
+
+        # Resume the original file link after force-sub is completed.
+        pending_token = _pending_fsub_links.pop(uid, None)
+        if pending_token:
+            result = await open_main(
+                update,
+                context,
+                pending_token,
+            )
+            try:
+                await q.message.delete()
+            except Exception:
+                pass
+            return result
 
         try:
             await q.message.delete()
